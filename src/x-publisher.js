@@ -221,11 +221,68 @@ function extractTitle(markdown, fileName) {
  */
 async function createNewArticle(page) {
     console.log('[Publisher] X Articles の新規記事ページへ移動...');
-    await page.goto('https://x.com/i/articles/new', { waitUntil: 'domcontentloaded' });
-    await page.waitForTimeout(3000);
 
-    // エディタが表示されるまで待つ
-    await page.waitForSelector('[contenteditable="true"]', { timeout: 30000 });
+    // Articles の URL（複数試す）
+    const articleUrls = [
+        'https://x.com/i/articles/new',
+        'https://twitter.com/i/articles/new'
+    ];
+
+    for (const url of articleUrls) {
+        try {
+            await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+            break;
+        } catch {
+            // 次の URL を試す
+        }
+    }
+
+    // ページが落ち着くまで待つ
+    await page.waitForTimeout(3000);
+    await page.waitForLoadState('networkidle').catch(() => {});
+
+    // ログインリダイレクトを検出
+    const currentUrl = page.url();
+    console.log(`[Publisher] 現在のURL: ${currentUrl}`);
+    if (currentUrl.includes('/login') || currentUrl.includes('/i/flow/login') || currentUrl.includes('/flow/')) {
+        throw new Error('セッションが期限切れです。Obsidian 設定から再度「連携する」→ Cookie 設定を行ってください。');
+    }
+
+    // エディタのセレクター候補（X Articles の実装に合わせて複数試す）
+    const editorSelectors = [
+        '[contenteditable="true"]',
+        '[contenteditable="true"][role="textbox"]',
+        'div.DraftEditor-editorContainer [contenteditable="true"]',
+        'div.public-DraftEditor-content',
+        '[data-testid="article-editor"] [contenteditable="true"]',
+        '[data-testid="article-body"]',
+        '.notranslate[contenteditable="true"]'
+    ];
+
+    let foundSelector = null;
+    for (const sel of editorSelectors) {
+        try {
+            await page.waitForSelector(sel, { timeout: 10000, state: 'visible' });
+            foundSelector = sel;
+            console.log(`[Publisher] エディタ検出: ${sel}`);
+            break;
+        } catch {
+            // 次のセレクターへ
+        }
+    }
+
+    if (!foundSelector) {
+        // デバッグ用スクリーンショットを保存
+        const screenshotPath = `/tmp/x-publisher-debug-${Date.now()}.png`;
+        await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
+        throw new Error(
+            `エディタが表示されませんでした。\n` +
+            `URL: ${page.url()}\n` +
+            `デバッグ用スクリーンショット: ${screenshotPath}\n` +
+            `Cookie が期限切れの可能性があります。再度「連携する」を実行してください。`
+        );
+    }
+
     await page.waitForTimeout(1000);
     console.log('[Publisher] エディタ準備完了');
 }
@@ -750,17 +807,30 @@ async function publishToX({ title, markdown, images = [], headless = true }) {
         throw new Error(`x-cookies.json が見つかりません。先に npm run login を実行してください。`);
     }
 
-    // ブラウザ起動（ボット検出を回避する設定）
-    const browser = await chromium.launch({
-        headless,
-        slowMo: 100,
-        args: [
-            '--disable-blink-features=AutomationControlled',
-            '--disable-infobars',
-            '--no-sandbox'
-        ],
-        ignoreDefaultArgs: ['--enable-automation']
-    });
+    // ブラウザ起動 — 本物の Chrome を優先（ボット検出回避）
+    let browser;
+    try {
+        browser = await chromium.launch({
+            channel: 'chrome',
+            headless,
+            slowMo: 100,
+            args: ['--disable-blink-features=AutomationControlled']
+        });
+        console.log('[Publisher] Chrome でブラウザ起動');
+    } catch {
+        // Chrome が未インストールの場合は Playwright 同梱 Chromium を使用
+        browser = await chromium.launch({
+            headless,
+            slowMo: 100,
+            args: [
+                '--disable-blink-features=AutomationControlled',
+                '--disable-infobars',
+                '--no-sandbox'
+            ],
+            ignoreDefaultArgs: ['--enable-automation']
+        });
+        console.log('[Publisher] Chromium でブラウザ起動（Chrome が見つかりません）');
+    }
 
     const storageState = JSON.parse(fs.readFileSync(COOKIES_PATH, 'utf-8'));
     const context = await browser.newContext({
