@@ -922,29 +922,30 @@ async function publishToX({ title, markdown, images = [], headless = true }) {
         throw new Error('Google Chrome が見つかりません。https://www.google.com/chrome/ からインストールしてください。');
     }
 
-    const profileDir = path.join(__dirname, '../.x-chrome-profile');
-    if (!fs.existsSync(profileDir)) {
-        throw new Error(
-            'Chrome プロファイルが未設定です。' +
-            'サーバーの「Chrome でログイン」を実行してください。'
-        );
+    if (!fs.existsSync(COOKIES_PATH)) {
+        throw new Error('セッション Cookie が未設定です。Obsidian 設定の「Chrome でログイン」を実行してください。');
     }
 
-    // ★ Chrome を spawn で普通に起動（navigator.webdriver = false → X のボット検出をバイパス）
-    //   launchPersistentContext は --enable-automation を付けるため使用しない
-    const CDP_PORT = 9223; // browser-setup の 9222 と競合しないよう別ポート
+    const storageState = JSON.parse(fs.readFileSync(COOKIES_PATH, 'utf-8'));
+    const authToken = storageState.cookies?.find(c => c.name === 'auth_token' && c.value)?.value;
+    if (!authToken) {
+        throw new Error('auth_token が見つかりません。「Chrome でログイン」を再実行してください。');
+    }
+
+    // ★ プロファイルに頼らず、フレッシュな Chrome に x-cookies.json を直接インジェクト
+    //   プロファイル方式はロック競合や未フラッシュで不安定なため使わない
+    const CDP_PORT = 9223;
     let chromeProc = null;
     let browser = null;
     try {
         const chromeArgs = [
             `--remote-debugging-port=${CDP_PORT}`,
-            `--user-data-dir=${profileDir}`,
             '--no-first-run',
             '--no-default-browser-check',
             '--disable-sync',
         ];
         if (headless) {
-            chromeArgs.push('--headless=new'); // Chrome 112+ の新ヘッドレスモード
+            chromeArgs.push('--headless=new');
         }
 
         chromeProc = spawn(chromePath, chromeArgs, { stdio: 'ignore', detached: false });
@@ -953,7 +954,6 @@ async function publishToX({ title, markdown, images = [], headless = true }) {
         const ready = await waitForChromeReady(CDP_PORT, 15000);
         if (!ready) throw new Error('Chrome の起動がタイムアウトしました');
 
-        // CDP 経由で接続（自動化フラグは注入されない）
         browser = await chromium.connectOverCDP(`http://localhost:${CDP_PORT}`);
         const contexts = browser.contexts();
         const context = contexts.length > 0 ? contexts[0] : null;
@@ -961,6 +961,28 @@ async function publishToX({ title, markdown, images = [], headless = true }) {
 
         const page = await context.newPage();
         page.setDefaultTimeout(60000);
+
+        // x.com のコンテキストにクッキーをインジェクト（ナビゲーション前に設定）
+        const cdpSession = await context.newCDPSession(page);
+        await cdpSession.send('Network.enable');
+        for (const cookie of storageState.cookies) {
+            try {
+                await cdpSession.send('Network.setCookie', {
+                    name: cookie.name,
+                    value: cookie.value,
+                    domain: cookie.domain,
+                    path: cookie.path || '/',
+                    expires: cookie.expires || -1,
+                    httpOnly: cookie.httpOnly || false,
+                    secure: cookie.secure !== false,
+                    sameSite: cookie.sameSite || 'None',
+                    url: 'https://x.com'
+                });
+            } catch (e) {
+                console.warn(`[Publisher] Cookie ${cookie.name} 設定失敗: ${e.message}`);
+            }
+        }
+        console.log(`[Publisher] ✅ ${storageState.cookies.length} 個のクッキーをインジェクト`);
 
         const articleUrl = await publishContent(page, title, markdown, images);
         return { articleUrl };
