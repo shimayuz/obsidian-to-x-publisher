@@ -13,6 +13,7 @@
 'use strict';
 
 const { chromium } = require('playwright');
+const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const dotenv = require('dotenv');
@@ -20,6 +21,35 @@ const dotenv = require('dotenv');
 dotenv.config({ path: path.join(__dirname, '../.env') });
 
 const COOKIES_PATH = path.join(__dirname, '../x-cookies.json');
+
+// ========================================
+// Chrome Binary Helpers (bot-detection bypass)
+// ========================================
+
+const CHROME_PATHS_MAC = [
+    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+    '/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary',
+    '/Applications/Chromium.app/Contents/MacOS/Chromium',
+];
+
+function findChromeBinary() {
+    for (const p of CHROME_PATHS_MAC) {
+        if (fs.existsSync(p)) return p;
+    }
+    return null;
+}
+
+async function waitForChromeReady(port, maxMs = 15000) {
+    const deadline = Date.now() + maxMs;
+    while (Date.now() < deadline) {
+        try {
+            const resp = await fetch(`http://localhost:${port}/json/version`);
+            if (resp.ok) return true;
+        } catch {}
+        await new Promise(r => setTimeout(r, 300));
+    }
+    return false;
+}
 
 // ========================================
 // Markdown Parser
@@ -887,78 +917,56 @@ async function publishToX({ title, markdown, images = [], headless = true }) {
     console.log(`[Publisher] タイトル: "${title}"`);
     console.log(`[Publisher] 画像数: ${images.length}`);
 
+    const chromePath = findChromeBinary();
+    if (!chromePath) {
+        throw new Error('Google Chrome が見つかりません。https://www.google.com/chrome/ からインストールしてください。');
+    }
+
     const profileDir = path.join(__dirname, '../.x-chrome-profile');
-    const antiBot = () => {
-        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-        Object.defineProperty(navigator, 'languages', { get: () => ['ja', 'en-US', 'en'] });
-    };
+    if (!fs.existsSync(profileDir)) {
+        throw new Error(
+            'Chrome プロファイルが未設定です。' +
+            'サーバーの「Chrome でログイン」を実行してください。'
+        );
+    }
 
-    // ─── 優先: 専用プロファイルの Chrome（OAuth でログイン済みのセッションを再利用）
+    // ★ Chrome を spawn で普通に起動（navigator.webdriver = false → X のボット検出をバイパス）
+    //   launchPersistentContext は --enable-automation を付けるため使用しない
+    const CDP_PORT = 9223; // browser-setup の 9222 と競合しないよう別ポート
+    let chromeProc = null;
+    let browser = null;
     try {
-        const ctx = await chromium.launchPersistentContext(profileDir, {
-            channel: 'chrome',
-            headless,
-            slowMo: 80,
-            args: ['--disable-blink-features=AutomationControlled'],
-            viewport: { width: 1280, height: 900 },
-            locale: 'ja-JP',
-            userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
-        });
-        await ctx.addInitScript(antiBot);
-        console.log('[Publisher] 専用プロファイルの Chrome で投稿');
-
-        const page = await ctx.newPage();
-        page.setDefaultTimeout(60000);
-        try {
-            const articleUrl = await publishContent(page, title, markdown, images);
-            return { articleUrl };
-        } finally {
-            await ctx.close();
+        const chromeArgs = [
+            `--remote-debugging-port=${CDP_PORT}`,
+            `--user-data-dir=${profileDir}`,
+            '--no-first-run',
+            '--no-default-browser-check',
+            '--disable-sync',
+        ];
+        if (headless) {
+            chromeArgs.push('--headless=new'); // Chrome 112+ の新ヘッドレスモード
         }
-    } catch (profileErr) {
-        console.warn('[Publisher] 専用プロファイル失敗、Cookie ファイルで再試行:', profileErr.message);
-    }
 
-    // ─── フォールバック: x-cookies.json の Cookie で Chromium 起動
-    if (!fs.existsSync(COOKIES_PATH)) {
-        throw new Error('セッション Cookie が設定されていません。プラグイン設定から「連携する」を実行してください。');
-    }
+        chromeProc = spawn(chromePath, chromeArgs, { stdio: 'ignore', detached: false });
+        console.log(`[Publisher] Chrome 起動 (headless=${headless}, CDP port=${CDP_PORT})`);
 
-    const storageState = JSON.parse(fs.readFileSync(COOKIES_PATH, 'utf-8'));
+        const ready = await waitForChromeReady(CDP_PORT, 15000);
+        if (!ready) throw new Error('Chrome の起動がタイムアウトしました');
 
-    let browser;
-    try {
-        browser = await chromium.launch({
-            channel: 'chrome',
-            headless,
-            slowMo: 80,
-            args: ['--disable-blink-features=AutomationControlled']
-        });
-    } catch {
-        browser = await chromium.launch({
-            headless,
-            slowMo: 80,
-            args: ['--disable-blink-features=AutomationControlled', '--no-sandbox'],
-            ignoreDefaultArgs: ['--enable-automation']
-        });
-    }
+        // CDP 経由で接続（自動化フラグは注入されない）
+        browser = await chromium.connectOverCDP(`http://localhost:${CDP_PORT}`);
+        const contexts = browser.contexts();
+        const context = contexts.length > 0 ? contexts[0] : null;
+        if (!context) throw new Error('ブラウザコンテキストが見つかりません');
 
-    const context = await browser.newContext({
-        storageState,
-        viewport: { width: 1280, height: 900 },
-        locale: 'ja-JP',
-        userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
-    });
-    await context.addInitScript(antiBot);
+        const page = await context.newPage();
+        page.setDefaultTimeout(60000);
 
-    const page = await context.newPage();
-    page.setDefaultTimeout(60000);
-
-    try {
         const articleUrl = await publishContent(page, title, markdown, images);
         return { articleUrl };
     } finally {
-        await browser.close();
+        if (browser) { try { await browser.close(); } catch {} }
+        if (chromeProc) { try { chromeProc.kill('SIGTERM'); } catch {} }
     }
 }
 
