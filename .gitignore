@@ -1,0 +1,27 @@
+# 認証情報・機密ファイル（絶対にコミットしない）
+.env
+x-cookies.json
+*.env
+*.local
+
+# Playwright ブラウザプロファイル
+.x-publisher-chrome/
+playwright-profile/
+
+# 依存パッケージ
+node_modules/
+plugin/node_modules/
+
+# ビルド成果物（リリースに添付するが git には含めない）
+plugin/main.js
+plugin/lib/
+
+# OS・エディタ系
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.log
+
+# テスト・デバッグ用スクリーンショット
+/tmp/

@@ -1,0 +1,30 @@
+{
+    "name": "obsidian-to-x-publisher",
+    "version": "1.0.0",
+    "description": "ObsidianのMarkdownをX Articlesに自動転記するツール",
+    "main": "src/server.js",
+    "scripts": {
+        "login": "node scripts/login.js",
+        "server": "node src/server.js",
+        "dev": "node src/x-publisher.js --debug"
+    },
+    "keywords": [
+        "obsidian",
+        "x",
+        "twitter",
+        "articles",
+        "markdown",
+        "publish",
+        "automation"
+    ],
+    "author": "shimayuz",
+    "license": "MIT",
+    "dependencies": {
+        "playwright": "^1.40.0",
+        "dotenv": "^16.3.1",
+        "express": "^4.18.0"
+    },
+    "engines": {
+        "node": ">=16.0.0"
+    }
+}
