@@ -246,6 +246,20 @@ class XPublisherClient {
         }
     }
 
+    async resetSession(): Promise<void> {
+        const response = await requestUrl({
+            url: `${this.serverUrl}/session/reset`,
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({}),
+            throw: false
+        });
+        if (response.status !== 200) {
+            const parsed = JSON.parse(response.text);
+            throw new Error(parsed.error || `HTTP ${response.status}`);
+        }
+    }
+
     async logout(): Promise<void> {
         const response = await requestUrl({
             url: `${this.serverUrl}/session/logout`,
@@ -680,6 +694,37 @@ class XPublisherSettingTab extends PluginSettingTab {
                             button.setButtonText('Chrome でログイン').setDisabled(false);
                             browserStatusEl.setText(`● エラー: ${err.message}`);
                             browserStatusEl.style.color = '#ef4444';
+                        }
+                    });
+            });
+
+        new Setting(containerEl)
+            .setName('Chrome プロファイルをリセット')
+            .setDesc('間違ったアカウントでログインした場合などにプロファイルを完全削除して最初からやり直します')
+            .addButton(button => {
+                button
+                    .setButtonText('プロファイルをリセット')
+                    .setWarning()
+                    .onClick(async () => {
+                        const isServerUp = await this.plugin.xClient.healthCheck();
+                        if (!isServerUp) {
+                            new Notice('サーバーが起動していません。npm run server を実行してください。', 6000);
+                            return;
+                        }
+                        button.setButtonText('リセット中...').setDisabled(true);
+                        try {
+                            await this.plugin.xClient.resetSession();
+                            browserStatusEl.setText('● プロファイル削除済み。再度「Chrome でログイン」してください');
+                            browserStatusEl.style.color = '#f59e0b';
+                            if (sessionStatusEl) {
+                                sessionStatusEl.setText('● 未設定（auth_token を入力してください）');
+                                sessionStatusEl.style.color = 'var(--text-muted)';
+                            }
+                            new Notice('Chrome プロファイルをリセットしました。「Chrome でログイン」から正しいアカウントでログインしてください。', 8000);
+                        } catch (err: any) {
+                            new Notice(`リセット失敗: ${err.message}`);
+                        } finally {
+                            button.setButtonText('プロファイルをリセット').setDisabled(false);
                         }
                     });
             });

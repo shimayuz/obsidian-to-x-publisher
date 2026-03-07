@@ -213,6 +213,19 @@ var XPublisherClient = class {
       return { status: "error", error: "\u30B5\u30FC\u30D0\u30FC\u306B\u63A5\u7D9A\u3067\u304D\u307E\u305B\u3093", sessionReady: false };
     }
   }
+  async resetSession() {
+    const response = await (0, import_obsidian.requestUrl)({
+      url: `${this.serverUrl}/session/reset`,
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+      throw: false
+    });
+    if (response.status !== 200) {
+      const parsed = JSON.parse(response.text);
+      throw new Error(parsed.error || `HTTP ${response.status}`);
+    }
+  }
   async logout() {
     const response = await (0, import_obsidian.requestUrl)({
       url: `${this.serverUrl}/session/logout`,
@@ -500,6 +513,30 @@ var XPublisherSettingTab = class extends import_obsidian.PluginSettingTab {
           button.setButtonText("Chrome \u3067\u30ED\u30B0\u30A4\u30F3").setDisabled(false);
           browserStatusEl.setText(`\u25CF \u30A8\u30E9\u30FC: ${err.message}`);
           browserStatusEl.style.color = "#ef4444";
+        }
+      });
+    });
+    new import_obsidian.Setting(containerEl).setName("Chrome \u30D7\u30ED\u30D5\u30A1\u30A4\u30EB\u3092\u30EA\u30BB\u30C3\u30C8").setDesc("\u9593\u9055\u3063\u305F\u30A2\u30AB\u30A6\u30F3\u30C8\u3067\u30ED\u30B0\u30A4\u30F3\u3057\u305F\u5834\u5408\u306A\u3069\u306B\u30D7\u30ED\u30D5\u30A1\u30A4\u30EB\u3092\u5B8C\u5168\u524A\u9664\u3057\u3066\u6700\u521D\u304B\u3089\u3084\u308A\u76F4\u3057\u307E\u3059").addButton((button) => {
+      button.setButtonText("\u30D7\u30ED\u30D5\u30A1\u30A4\u30EB\u3092\u30EA\u30BB\u30C3\u30C8").setWarning().onClick(async () => {
+        const isServerUp = await this.plugin.xClient.healthCheck();
+        if (!isServerUp) {
+          new import_obsidian.Notice("\u30B5\u30FC\u30D0\u30FC\u304C\u8D77\u52D5\u3057\u3066\u3044\u307E\u305B\u3093\u3002npm run server \u3092\u5B9F\u884C\u3057\u3066\u304F\u3060\u3055\u3044\u3002", 6e3);
+          return;
+        }
+        button.setButtonText("\u30EA\u30BB\u30C3\u30C8\u4E2D...").setDisabled(true);
+        try {
+          await this.plugin.xClient.resetSession();
+          browserStatusEl.setText("\u25CF \u30D7\u30ED\u30D5\u30A1\u30A4\u30EB\u524A\u9664\u6E08\u307F\u3002\u518D\u5EA6\u300CChrome \u3067\u30ED\u30B0\u30A4\u30F3\u300D\u3057\u3066\u304F\u3060\u3055\u3044");
+          browserStatusEl.style.color = "#f59e0b";
+          if (sessionStatusEl) {
+            sessionStatusEl.setText("\u25CF \u672A\u8A2D\u5B9A\uFF08auth_token \u3092\u5165\u529B\u3057\u3066\u304F\u3060\u3055\u3044\uFF09");
+            sessionStatusEl.style.color = "var(--text-muted)";
+          }
+          new import_obsidian.Notice("Chrome \u30D7\u30ED\u30D5\u30A1\u30A4\u30EB\u3092\u30EA\u30BB\u30C3\u30C8\u3057\u307E\u3057\u305F\u3002\u300CChrome \u3067\u30ED\u30B0\u30A4\u30F3\u300D\u304B\u3089\u6B63\u3057\u3044\u30A2\u30AB\u30A6\u30F3\u30C8\u3067\u30ED\u30B0\u30A4\u30F3\u3057\u3066\u304F\u3060\u3055\u3044\u3002", 8e3);
+        } catch (err) {
+          new import_obsidian.Notice(`\u30EA\u30BB\u30C3\u30C8\u5931\u6557: ${err.message}`);
+        } finally {
+          button.setButtonText("\u30D7\u30ED\u30D5\u30A1\u30A4\u30EB\u3092\u30EA\u30BB\u30C3\u30C8").setDisabled(false);
         }
       });
     });
