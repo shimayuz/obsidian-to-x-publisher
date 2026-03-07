@@ -481,9 +481,9 @@ class XPublisherSettingTab extends PluginSettingTab {
         const cookieDescEl = containerEl.createEl('p', { cls: 'setting-item-description' });
         cookieDescEl.style.cssText = 'margin: 0 0 12px; font-size: 13px; color: var(--text-muted);';
         cookieDescEl.innerHTML =
-            'Safari / Chrome で <a href="https://x.com" target="_blank">x.com</a> にログイン後、' +
-            '開発者ツール（F12）→ Application タブ → Cookies → <code>.x.com</code> を開き、' +
-            '<code>auth_token</code> と <code>ct0</code> の値をコピーして入力してください。';
+            '通常は「X アカウント連携」時に自動取得されます。<br>' +
+            '自動取得できなかった場合のみ、Safari / Chrome の開発者ツール → Application → Cookies → ' +
+            '<code>.x.com</code> から <code>auth_token</code> と <code>ct0</code> をコピーして手動入力してください。';
 
         let authTokenInputEl: HTMLInputElement;
         new Setting(containerEl)
@@ -713,7 +713,11 @@ class XPublisherSettingTab extends PluginSettingTab {
                 button.setButtonText('再連携').setDisabled(false);
                 statusEl.setText('● Bearer トークン取得済み');
                 statusEl.style.color = '#10b981';
-                new Notice('OAuth 認証完了！「セッション Cookie 設定」で auth_token を入力してください。', 8000);
+                if (status.sessionReady) {
+                    new Notice('認証完了！投稿できるようになりました。', 5000);
+                } else {
+                    new Notice('OAuth 完了。Cookie が自動取得できなかった場合は「セッション Cookie 設定」で手動入力してください。', 10000);
+                }
                 return;
             }
 

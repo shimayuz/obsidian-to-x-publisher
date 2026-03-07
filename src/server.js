@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 /**
- * obsidian-to-x-publisher Local HTTP Server v2.1.0
+ * obsidian-to-x-publisher Local HTTP Server v2.2.0
  *
  * OAuth 2.0 PKCE 認証フローを内蔵
- * 認証はシステムブラウザ（Safari/Chrome）で行うため
- * ボット検出の影響を受けません
+ * 認証は本物の Chrome（Playwright channel: 'chrome'）で行うため
+ * ボット検出の影響を受けず、auth_token / ct0 も自動取得
  *
  * X Developer Portal に登録する Callback URI:
  *   http://127.0.0.1:3001/oauth/callback
@@ -18,6 +18,13 @@ const fs = require('fs');
 const crypto = require('crypto');
 const { exec } = require('child_process');
 const dotenv = require('dotenv');
+
+let chromium;
+try {
+    chromium = require('playwright').chromium;
+} catch {
+    // playwright not installed – fall back to system browser
+}
 
 const ENV_PATH = path.join(__dirname, '../.env');
 const COOKIES_PATH = path.join(__dirname, '../x-cookies.json');
@@ -41,7 +48,8 @@ const oauth = {
     codeVerifier: null,
     expectedState: null,
     clientId: null,
-    clientSecret: null
+    clientSecret: null,
+    browserContext: null  // Playwright browser context (for cookie capture)
 };
 
 // ========================================
@@ -58,6 +66,61 @@ function generateCodeChallenge(verifier) {
 
 function generateState() {
     return crypto.randomBytes(16).toString('hex');
+}
+
+// ========================================
+// OAuth Browser Launcher
+// ========================================
+
+async function launchOAuthBrowser(url) {
+    // Try Playwright with real Chrome (avoids bot detection, captures cookies automatically)
+    if (chromium) {
+        try {
+            const browser = await chromium.launch({
+                channel: 'chrome',   // Real Chrome – not Playwright's bundled Chromium
+                headless: false,
+                slowMo: 50,
+                args: ['--disable-blink-features=AutomationControlled']
+            });
+
+            const context = await browser.newContext({
+                viewport: { width: 1280, height: 900 },
+                locale: 'ja-JP',
+                userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+            });
+
+            await context.addInitScript(() => {
+                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                Object.defineProperty(navigator, 'languages', { get: () => ['ja', 'en-US', 'en'] });
+            });
+
+            oauth.browserContext = context;
+
+            const page = await context.newPage();
+            await page.goto(url, { waitUntil: 'domcontentloaded' });
+
+            console.log('[OAuth] Chrome が起動しました。X にログインしてください...');
+            return;
+        } catch (chromeErr) {
+            console.warn('[OAuth] Chrome が見つかりません。システムブラウザで開きます:', chromeErr.message);
+            oauth.browserContext = null;
+        }
+    }
+
+    // Fallback: open in system browser (manual cookie entry required)
+    console.log('[OAuth] システムブラウザで認証フローを開始します...');
+    const openCmd = process.platform === 'win32' ? `start "" "${url}"`
+                  : process.platform === 'linux'  ? `xdg-open "${url}"`
+                  : `open "${url}"`;
+
+    await new Promise((resolve, reject) => {
+        exec(openCmd, (err) => {
+            if (err) reject(err);
+            else resolve();
+        });
+    });
+
+    console.log('[OAuth] ブラウザを開きました。X.com でログインしてください...');
 }
 
 // ========================================
@@ -156,7 +219,7 @@ function renderCallbackPage(title, message, success) {
 app.get('/health', (req, res) => {
     res.json({
         status: 'ok',
-        version: '2.1.0',
+        version: '2.2.0',
         oauthConnected: !!process.env.X_ACCESS_TOKEN,
         sessionReady: hasValidSession()
     });
@@ -199,23 +262,13 @@ app.post('/oauth/start', (req, res) => {
     authUrl.searchParams.set('code_challenge_method', 'S256');
 
     const url = authUrl.toString();
-    console.log('[OAuth] 認証フロー開始 - システムブラウザを起動...');
-
-    // Open in system browser (Safari/Chrome) — avoids bot detection
-    const openCmd = process.platform === 'win32' ? `start "" "${url}"`
-                  : process.platform === 'linux'  ? `xdg-open "${url}"`
-                  : `open "${url}"`;
-
-    exec(openCmd, (err) => {
-        if (err) {
-            console.error('[OAuth] ブラウザ起動失敗:', err.message);
-            Object.assign(oauth, { status: 'error', error: 'ブラウザを開けませんでした: ' + err.message });
-        } else {
-            console.log('[OAuth] ブラウザを開きました。X.com でログインしてください...');
-        }
-    });
-
     res.json({ status: 'pending' });
+
+    // Launch in background (do not await)
+    launchOAuthBrowser(url).catch(err => {
+        console.error('[OAuth] ブラウザ起動失敗:', err.message);
+        Object.assign(oauth, { status: 'error', error: 'ブラウザを開けませんでした: ' + err.message });
+    });
 });
 
 // ========================================
@@ -252,20 +305,59 @@ app.get('/oauth/callback', async (req, res) => {
             X_ACCESS_TOKEN: tokens.access_token,
             X_REFRESH_TOKEN: tokens.refresh_token || ''
         });
+        console.log('[OAuth] ✅ Bearer トークン取得完了');
+
+        // Auto-capture session cookies from Playwright browser context
+        let cookiesCaptured = false;
+        if (oauth.browserContext) {
+            try {
+                // Small wait to ensure X has finished setting all cookies
+                await new Promise(r => setTimeout(r, 800));
+                const storageState = await oauth.browserContext.storageState();
+                const authToken = storageState.cookies?.find(c => c.name === 'auth_token' && c.value)?.value;
+
+                if (authToken) {
+                    fs.writeFileSync(COOKIES_PATH, JSON.stringify(storageState, null, 2));
+                    updateEnvFile({ X_AUTH_TOKEN: authToken });
+                    const ct0 = storageState.cookies.find(c => c.name === 'ct0')?.value;
+                    if (ct0) updateEnvFile({ X_CSRF_TOKEN: ct0 });
+                    cookiesCaptured = true;
+                    console.log('[OAuth] ✅ Session cookies 自動取得完了 (auth_token, ct0)');
+                } else {
+                    console.warn('[OAuth] auth_token が見つかりませんでした。手動設定が必要です。');
+                }
+            } catch (cookieErr) {
+                console.warn('[OAuth] Cookie 自動取得失敗:', cookieErr.message);
+            }
+
+            // Close Playwright browser after a short delay
+            const ctx = oauth.browserContext;
+            oauth.browserContext = null;
+            setTimeout(async () => {
+                try { await ctx.browser()?.close(); } catch {}
+            }, 3000);
+        }
 
         Object.assign(oauth, { status: 'success', error: null });
-        console.log('[OAuth] ✅ Bearer トークン取得完了');
 
         res.send(renderCallbackPage(
             '✅ OAuth 認証完了',
-            'このタブを閉じて、Obsidian に戻ってください。<br><br>' +
-            '次のステップ: プラグイン設定の「セッション Cookie 設定」で<br>' +
-            '<code>auth_token</code> と <code>ct0</code> を入力してください。',
+            cookiesCaptured
+                ? 'このタブを閉じて Obsidian に戻ってください。<br>投稿できるようになりました！'
+                : 'このタブを閉じて Obsidian に戻ってください。<br><br>' +
+                  '⚠️ Cookie の自動取得に失敗しました。<br>' +
+                  'プラグイン設定の「セッション Cookie 設定」で<br>' +
+                  '<code>auth_token</code> と <code>ct0</code> を手動入力してください。',
             true
         ));
     } catch (err) {
         Object.assign(oauth, { status: 'error', error: err.message });
         console.error('[OAuth] コールバックエラー:', err.message);
+        if (oauth.browserContext) {
+            const ctx = oauth.browserContext;
+            oauth.browserContext = null;
+            setTimeout(async () => { try { await ctx.browser()?.close(); } catch {} }, 1000);
+        }
         res.send(renderCallbackPage('❌ エラー', err.message, false));
     }
 });
@@ -357,7 +449,7 @@ app.post('/publish', async (req, res) => {
 // ========================================
 
 app.listen(PORT, '127.0.0.1', () => {
-    console.log(`\n[X Publisher Server] v2.1.0 起動`);
+    console.log(`\n[X Publisher Server] v2.2.0 起動`);
     console.log(`[X Publisher Server] http://127.0.0.1:${PORT}/health`);
     console.log(`[X Publisher Server] OAuth コールバック: ${REDIRECT_URI}\n`);
 
