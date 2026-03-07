@@ -217,6 +217,21 @@ class XPublisherClient {
         }
     }
 
+    async logout(): Promise<void> {
+        const response = await requestUrl({
+            url: `${this.serverUrl}/session/logout`,
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({}),
+            throw: false
+        });
+
+        if (response.status !== 200) {
+            const parsed = JSON.parse(response.text);
+            throw new Error(parsed.error || `HTTP ${response.status}`);
+        }
+    }
+
     async publish(params: {
         title: string;
         markdown: string;
@@ -463,6 +478,7 @@ class XPublisherSettingTab extends PluginSettingTab {
         statusEl.setText('● 接続状態を確認中...');
 
         let connectBtn!: ButtonComponent;
+        let sessionStatusEl!: HTMLElement; // logout ボタンから参照するため早期宣言
 
         new Setting(containerEl)
             .setName('X アカウントを連携')
@@ -473,6 +489,38 @@ class XPublisherSettingTab extends PluginSettingTab {
                     .setButtonText('連携する')
                     .setCta()
                     .onClick(() => this.startOAuthFlow(connectBtn, statusEl));
+            });
+
+        new Setting(containerEl)
+            .setName('ログアウト / 連携解除')
+            .setDesc('X との連携を解除し、保存された Cookie・Chrome プロファイルをすべて削除します')
+            .addButton(button => {
+                button
+                    .setButtonText('ログアウト')
+                    .setWarning()
+                    .onClick(async () => {
+                        const isServerUp = await this.plugin.xClient.healthCheck();
+                        if (!isServerUp) {
+                            new Notice('サーバーが起動していません。npm run server を実行してください。', 6000);
+                            return;
+                        }
+                        button.setButtonText('ログアウト中...').setDisabled(true);
+                        try {
+                            await this.plugin.xClient.logout();
+                            statusEl.setText('● 未接続');
+                            statusEl.style.color = 'var(--text-muted)';
+                            if (sessionStatusEl) {
+                                sessionStatusEl.setText('● 未設定（auth_token を入力してください）');
+                                sessionStatusEl.style.color = 'var(--text-muted)';
+                            }
+                            connectBtn.setButtonText('連携する').setDisabled(false);
+                            new Notice('ログアウトしました。再度「連携する」から認証してください。', 6000);
+                        } catch (err: any) {
+                            new Notice(`ログアウト失敗: ${err.message}`);
+                        } finally {
+                            button.setButtonText('ログアウト').setDisabled(false);
+                        }
+                    });
             });
 
         // ─── セッション Cookie 設定 ───
@@ -522,7 +570,7 @@ class XPublisherSettingTab extends PluginSettingTab {
                     });
             });
 
-        const sessionStatusEl = containerEl.createDiv();
+        sessionStatusEl = containerEl.createDiv();
         sessionStatusEl.style.cssText = 'padding: 4px 0 12px; font-size: 13px;';
         sessionStatusEl.setText('● 状態を確認中...');
 

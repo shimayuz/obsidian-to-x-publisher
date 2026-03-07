@@ -184,6 +184,19 @@ var XPublisherClient = class {
       throw new Error(parsed.error || `HTTP ${response.status}`);
     }
   }
+  async logout() {
+    const response = await (0, import_obsidian.requestUrl)({
+      url: `${this.serverUrl}/session/logout`,
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+      throw: false
+    });
+    if (response.status !== 200) {
+      const parsed = JSON.parse(response.text);
+      throw new Error(parsed.error || `HTTP ${response.status}`);
+    }
+  }
   async publish(params) {
     try {
       const bodyStr = JSON.stringify({
@@ -345,9 +358,35 @@ var XPublisherSettingTab = class extends import_obsidian.PluginSettingTab {
     statusEl.style.cssText = "padding: 4px 0 12px; font-size: 13px;";
     statusEl.setText("\u25CF \u63A5\u7D9A\u72B6\u614B\u3092\u78BA\u8A8D\u4E2D...");
     let connectBtn;
+    let sessionStatusEl;
     new import_obsidian.Setting(containerEl).setName("X \u30A2\u30AB\u30A6\u30F3\u30C8\u3092\u9023\u643A").setDesc("\u30AF\u30EA\u30C3\u30AF\u3059\u308B\u3068\u30D6\u30E9\u30A6\u30B6\u304C\u8D77\u52D5\u3057\u3001X \u306E\u30ED\u30B0\u30A4\u30F3\u753B\u9762\u304C\u8868\u793A\u3055\u308C\u307E\u3059").addButton((button) => {
       connectBtn = button;
       button.setButtonText("\u9023\u643A\u3059\u308B").setCta().onClick(() => this.startOAuthFlow(connectBtn, statusEl));
+    });
+    new import_obsidian.Setting(containerEl).setName("\u30ED\u30B0\u30A2\u30A6\u30C8 / \u9023\u643A\u89E3\u9664").setDesc("X \u3068\u306E\u9023\u643A\u3092\u89E3\u9664\u3057\u3001\u4FDD\u5B58\u3055\u308C\u305F Cookie\u30FBChrome \u30D7\u30ED\u30D5\u30A1\u30A4\u30EB\u3092\u3059\u3079\u3066\u524A\u9664\u3057\u307E\u3059").addButton((button) => {
+      button.setButtonText("\u30ED\u30B0\u30A2\u30A6\u30C8").setWarning().onClick(async () => {
+        const isServerUp = await this.plugin.xClient.healthCheck();
+        if (!isServerUp) {
+          new import_obsidian.Notice("\u30B5\u30FC\u30D0\u30FC\u304C\u8D77\u52D5\u3057\u3066\u3044\u307E\u305B\u3093\u3002npm run server \u3092\u5B9F\u884C\u3057\u3066\u304F\u3060\u3055\u3044\u3002", 6e3);
+          return;
+        }
+        button.setButtonText("\u30ED\u30B0\u30A2\u30A6\u30C8\u4E2D...").setDisabled(true);
+        try {
+          await this.plugin.xClient.logout();
+          statusEl.setText("\u25CF \u672A\u63A5\u7D9A");
+          statusEl.style.color = "var(--text-muted)";
+          if (sessionStatusEl) {
+            sessionStatusEl.setText("\u25CF \u672A\u8A2D\u5B9A\uFF08auth_token \u3092\u5165\u529B\u3057\u3066\u304F\u3060\u3055\u3044\uFF09");
+            sessionStatusEl.style.color = "var(--text-muted)";
+          }
+          connectBtn.setButtonText("\u9023\u643A\u3059\u308B").setDisabled(false);
+          new import_obsidian.Notice("\u30ED\u30B0\u30A2\u30A6\u30C8\u3057\u307E\u3057\u305F\u3002\u518D\u5EA6\u300C\u9023\u643A\u3059\u308B\u300D\u304B\u3089\u8A8D\u8A3C\u3057\u3066\u304F\u3060\u3055\u3044\u3002", 6e3);
+        } catch (err) {
+          new import_obsidian.Notice(`\u30ED\u30B0\u30A2\u30A6\u30C8\u5931\u6557: ${err.message}`);
+        } finally {
+          button.setButtonText("\u30ED\u30B0\u30A2\u30A6\u30C8").setDisabled(false);
+        }
+      });
     });
     containerEl.createEl("h3", { text: "\u30BB\u30C3\u30B7\u30E7\u30F3 Cookie \u8A2D\u5B9A" });
     const cookieDescEl = containerEl.createEl("p", { cls: "setting-item-description" });
@@ -377,7 +416,7 @@ var XPublisherSettingTab = class extends import_obsidian.PluginSettingTab {
         button.setIcon(hidden ? "eye-off" : "eye");
       });
     });
-    const sessionStatusEl = containerEl.createDiv();
+    sessionStatusEl = containerEl.createDiv();
     sessionStatusEl.style.cssText = "padding: 4px 0 12px; font-size: 13px;";
     sessionStatusEl.setText("\u25CF \u72B6\u614B\u3092\u78BA\u8A8D\u4E2D...");
     new import_obsidian.Setting(containerEl).setName("Cookie \u3092\u4FDD\u5B58").setDesc("\u5165\u529B\u3057\u305F Cookie \u3092\u30B5\u30FC\u30D0\u30FC\u306B\u9001\u4FE1\u3057\u307E\u3059").addButton((button) => {

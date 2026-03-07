@@ -220,49 +220,70 @@ function extractTitle(markdown, fileName) {
  * @param {import('playwright').Page} page
  */
 async function createNewArticle(page) {
-    console.log('[Publisher] X Articles の新規記事ページへ移動...');
+    console.log('[Publisher] X Articles ページへ移動...');
 
-    // Articles の URL（複数試す）
-    const articleUrls = [
-        'https://x.com/i/articles/new',
-        'https://twitter.com/i/articles/new'
-    ];
-
-    for (const url of articleUrls) {
-        try {
-            await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-            break;
-        } catch {
-            // 次の URL を試す
-        }
-    }
-
-    // ページが落ち着くまで待つ
-    await page.waitForTimeout(3000);
+    // ① 記事一覧ページへ
+    await page.goto('https://x.com/i/articles', { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.waitForTimeout(2000);
     await page.waitForLoadState('networkidle').catch(() => {});
 
     // ログインリダイレクトを検出
-    const currentUrl = page.url();
-    console.log(`[Publisher] 現在のURL: ${currentUrl}`);
-    if (currentUrl.includes('/login') || currentUrl.includes('/i/flow/login') || currentUrl.includes('/flow/')) {
-        throw new Error('セッションが期限切れです。Obsidian 設定から再度「連携する」→ Cookie 設定を行ってください。');
+    const afterListUrl = page.url();
+    console.log(`[Publisher] 記事一覧URL: ${afterListUrl}`);
+    if (afterListUrl.includes('/login') || afterListUrl.includes('/i/flow/login') || afterListUrl.includes('/flow/')) {
+        throw new Error('セッションが期限切れです。Obsidian 設定から再度「連携する」を実行してください。');
     }
 
-    // エディタのセレクター候補（X Articles の実装に合わせて複数試す）
+    // ② 「記事を作成」ボタンをクリック
+    const createBtnSelectors = [
+        'button:has-text("記事を作成")',
+        'button:has-text("Create article")',
+        'button:has-text("New article")',
+        '[data-testid="create-article"]'
+    ];
+
+    let createBtnClicked = false;
+    for (const selector of createBtnSelectors) {
+        try {
+            const btn = page.locator(selector).first();
+            await btn.waitFor({ state: 'visible', timeout: 8000 });
+            await btn.click();
+            createBtnClicked = true;
+            console.log(`[Publisher] 「記事を作成」ボタンクリック: ${selector}`);
+            break;
+        } catch {
+            // 次のセレクターへ
+        }
+    }
+
+    if (!createBtnClicked) {
+        // フォールバック: /new に直接アクセス
+        console.warn('[Publisher] 「記事を作成」ボタンが見つからず、直接 /new へ移動します');
+        await page.goto('https://x.com/i/articles/new', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+        await page.waitForTimeout(2000);
+    }
+
+    // ③ エディタが表示されるまで待つ
+    await page.waitForTimeout(2000);
+    await page.waitForLoadState('networkidle').catch(() => {});
+
+    const afterEditorUrl = page.url();
+    console.log(`[Publisher] エディタURL: ${afterEditorUrl}`);
+    if (afterEditorUrl.includes('/login') || afterEditorUrl.includes('/i/flow/login')) {
+        throw new Error('セッションが期限切れです。Obsidian 設定から再度「連携する」を実行してください。');
+    }
+
     const editorSelectors = [
         '[contenteditable="true"]',
-        '[contenteditable="true"][role="textbox"]',
-        'div.DraftEditor-editorContainer [contenteditable="true"]',
         'div.public-DraftEditor-content',
-        '[data-testid="article-editor"] [contenteditable="true"]',
-        '[data-testid="article-body"]',
-        '.notranslate[contenteditable="true"]'
+        '[contenteditable="true"][role="textbox"]',
+        '[data-testid="article-body"]'
     ];
 
     let foundSelector = null;
     for (const sel of editorSelectors) {
         try {
-            await page.waitForSelector(sel, { timeout: 10000, state: 'visible' });
+            await page.waitForSelector(sel, { timeout: 15000, state: 'visible' });
             foundSelector = sel;
             console.log(`[Publisher] エディタ検出: ${sel}`);
             break;
@@ -272,14 +293,13 @@ async function createNewArticle(page) {
     }
 
     if (!foundSelector) {
-        // デバッグ用スクリーンショットを保存
         const screenshotPath = `/tmp/x-publisher-debug-${Date.now()}.png`;
         await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
         throw new Error(
             `エディタが表示されませんでした。\n` +
             `URL: ${page.url()}\n` +
-            `デバッグ用スクリーンショット: ${screenshotPath}\n` +
-            `Cookie が期限切れの可能性があります。再度「連携する」を実行してください。`
+            `スクリーンショット: ${screenshotPath}\n` +
+            `Cookie が期限切れの可能性があります。ログアウト後に再度「連携する」を実行してください。`
         );
     }
 

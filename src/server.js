@@ -155,6 +155,17 @@ async function exchangeCodeForTokens(code, codeVerifier, clientId, clientSecret)
 // Env Persistence
 // ========================================
 
+function clearEnvKeys(keys) {
+    if (!fs.existsSync(ENV_PATH)) return;
+    let content = fs.readFileSync(ENV_PATH, 'utf-8');
+    for (const key of keys) {
+        content = content.replace(new RegExp(`^${key}=.*\\n?`, 'm'), '');
+        delete process.env[key];
+    }
+    const trimmed = content.trim();
+    fs.writeFileSync(ENV_PATH, trimmed ? trimmed + '\n' : '');
+}
+
 function updateEnvFile(updates) {
     let content = fs.existsSync(ENV_PATH) ? fs.readFileSync(ENV_PATH, 'utf-8') : '';
     for (const [key, value] of Object.entries(updates)) {
@@ -394,6 +405,56 @@ app.post('/session/cookies', (req, res) => {
     if (csrfToken) updateEnvFile({ X_CSRF_TOKEN: csrfToken });
 
     console.log('[Session] ✅ Cookie を保存しました');
+    res.json({ success: true });
+});
+
+// ========================================
+// Logout: Clear All Session Data
+// ========================================
+
+app.post('/session/logout', async (req, res) => {
+    // Open browser context を閉じる
+    if (oauth.browserContext) {
+        const ctx = oauth.browserContext;
+        oauth.browserContext = null;
+        try { await ctx.close(); } catch {}
+    }
+
+    // OAuth state をリセット
+    Object.assign(oauth, {
+        status: 'idle',
+        error: null,
+        codeVerifier: null,
+        expectedState: null,
+        clientId: null,
+        clientSecret: null
+    });
+
+    // Chrome プロファイルディレクトリを削除
+    const profileDir = path.join(__dirname, '../.x-chrome-profile');
+    if (fs.existsSync(profileDir)) {
+        try {
+            fs.rmSync(profileDir, { recursive: true, force: true });
+            console.log('[Logout] Chrome プロファイルを削除しました');
+        } catch (e) {
+            console.warn('[Logout] プロファイル削除失敗:', e.message);
+        }
+    }
+
+    // Cookie ファイルを削除
+    if (fs.existsSync(COOKIES_PATH)) {
+        try {
+            fs.unlinkSync(COOKIES_PATH);
+            console.log('[Logout] Cookie ファイルを削除しました');
+        } catch (e) {
+            console.warn('[Logout] Cookie ファイル削除失敗:', e.message);
+        }
+    }
+
+    // .env からトークンを削除
+    clearEnvKeys(['X_ACCESS_TOKEN', 'X_REFRESH_TOKEN', 'X_AUTH_TOKEN', 'X_CSRF_TOKEN']);
+
+    console.log('[Logout] ✅ ログアウト完了');
     res.json({ success: true });
 });
 
