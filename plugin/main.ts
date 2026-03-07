@@ -481,9 +481,10 @@ class XPublisherSettingTab extends PluginSettingTab {
         const cookieDescEl = containerEl.createEl('p', { cls: 'setting-item-description' });
         cookieDescEl.style.cssText = 'margin: 0 0 12px; font-size: 13px; color: var(--text-muted);';
         cookieDescEl.innerHTML =
-            '通常は「X アカウント連携」時に自動取得されます。<br>' +
-            '自動取得できなかった場合のみ、Safari / Chrome の開発者ツール → Application → Cookies → ' +
-            '<code>.x.com</code> から <code>auth_token</code> と <code>ct0</code> をコピーして手動入力してください。';
+            '<b>設定方法：</b> Safari / Chrome で <a href="https://x.com" target="_blank">x.com</a> にログインした状態で、<br>' +
+            '開発者ツール（Mac: <code>Cmd+Option+I</code> / Win: <code>F12</code>）を開き、<br>' +
+            '<b>Application</b> タブ → <b>Cookies</b> → <b>.x.com</b> を選択し、<br>' +
+            '<code>auth_token</code> と <code>ct0</code> の Value をコピーして貼り付けてください。';
 
         let authTokenInputEl: HTMLInputElement;
         new Setting(containerEl)
