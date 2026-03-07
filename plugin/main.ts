@@ -217,6 +217,35 @@ class XPublisherClient {
         }
     }
 
+    async startBrowserSetup(): Promise<void> {
+        const response = await requestUrl({
+            url: `${this.serverUrl}/session/browser-setup`,
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({}),
+            throw: false
+        });
+        if (response.status === 409) return; // already running
+        if (response.status === 503) {
+            const parsed = JSON.parse(response.text);
+            throw new Error(parsed.error || 'Playwright が必要です');
+        }
+    }
+
+    async getBrowserSetupStatus(): Promise<{ status: string; error: string | null; sessionReady: boolean }> {
+        try {
+            const response = await requestUrl({
+                url: `${this.serverUrl}/session/browser-setup/status`,
+                method: 'GET',
+                throw: false
+            });
+            if (response.status !== 200) return { status: 'error', error: 'ステータス取得失敗', sessionReady: false };
+            return JSON.parse(response.text);
+        } catch {
+            return { status: 'error', error: 'サーバーに接続できません', sessionReady: false };
+        }
+    }
+
     async logout(): Promise<void> {
         const response = await requestUrl({
             url: `${this.serverUrl}/session/logout`,
@@ -611,6 +640,50 @@ class XPublisherSettingTab extends PluginSettingTab {
         // connectBtn と sessionStatusEl が揃ったのでステータス確認
         this.checkInitialStatus(statusEl, connectBtn, sessionStatusEl);
 
+        // ─── Playwright Chrome ログイン（推奨）───
+        containerEl.createEl('h3', { text: 'Playwright Chrome でX にログイン（推奨）' });
+
+        const browserDescEl = containerEl.createEl('p', { cls: 'setting-item-description' });
+        browserDescEl.style.cssText = 'margin: 0 0 12px; font-size: 13px; color: var(--text-muted);';
+        browserDescEl.innerHTML =
+            '✅ <b>この方法が最も確実です。</b><br>' +
+            'Chrome ウィンドウが開くので X にログインすると、Cookie が自動取得されます。<br>' +
+            'すでにログイン済みの場合は数秒で自動完了します。<br>' +
+            '<small>※ DevTools でのコピー不要。初回または Chrome プロファイルをリセットした後に使用。</small>';
+
+        const browserStatusEl = containerEl.createDiv();
+        browserStatusEl.style.cssText = 'padding: 4px 0 12px; font-size: 13px;';
+        browserStatusEl.setText('● 待機中');
+        browserStatusEl.style.color = 'var(--text-muted)';
+
+        new Setting(containerEl)
+            .setName('Chrome でログイン')
+            .setDesc('Chrome が起動します。X にログインすると自動でセッションが設定されます')
+            .addButton(button => {
+                button
+                    .setButtonText('Chrome でログイン')
+                    .setCta()
+                    .onClick(async () => {
+                        const isServerUp = await this.plugin.xClient.healthCheck();
+                        if (!isServerUp) {
+                            new Notice('サーバーが起動していません。npm run server を実行してください。', 6000);
+                            return;
+                        }
+                        button.setButtonText('Chrome 起動中...').setDisabled(true);
+                        browserStatusEl.setText('● Chrome を起動しています...');
+                        browserStatusEl.style.color = '#f59e0b';
+                        try {
+                            await this.plugin.xClient.startBrowserSetup();
+                            new Notice('Chrome が起動しました。X にログインしてください（すでにログイン済みの場合は自動完了）', 8000);
+                            await this.pollBrowserSetup(button, browserStatusEl, sessionStatusEl);
+                        } catch (err: any) {
+                            button.setButtonText('Chrome でログイン').setDisabled(false);
+                            browserStatusEl.setText(`● エラー: ${err.message}`);
+                            browserStatusEl.style.color = '#ef4444';
+                        }
+                    });
+            });
+
         // ─── 動作設定 ───
         containerEl.createEl('h3', { text: '動作設定' });
 
@@ -715,6 +788,38 @@ class XPublisherSettingTab extends PluginSettingTab {
             sessionStatusEl.setText('● 未設定（auth_token を入力してください）');
             sessionStatusEl.style.color = 'var(--text-muted)';
         }
+    }
+
+    private async pollBrowserSetup(
+        button: ButtonComponent,
+        browserStatusEl: HTMLElement,
+        sessionStatusEl: HTMLElement
+    ): Promise<void> {
+        const MAX_POLLS = 180; // 6 minutes
+        for (let i = 0; i < MAX_POLLS; i++) {
+            await new Promise<void>(resolve => setTimeout(resolve, 2000));
+            const result = await this.plugin.xClient.getBrowserSetupStatus();
+
+            if (result.status === 'success') {
+                button.setButtonText('Chrome でログイン').setDisabled(false);
+                browserStatusEl.setText('● セッション設定完了 ✅');
+                browserStatusEl.style.color = '#10b981';
+                sessionStatusEl.setText('● Cookie 設定済み ✅（投稿可能）');
+                sessionStatusEl.style.color = '#10b981';
+                new Notice('✅ Chrome ログイン完了！投稿できるようになりました。', 6000);
+                return;
+            }
+            if (result.status === 'error') {
+                button.setButtonText('Chrome でログイン').setDisabled(false);
+                browserStatusEl.setText(`● エラー: ${result.error || '不明なエラー'}`);
+                browserStatusEl.style.color = '#ef4444';
+                new Notice(`Chrome ログインに失敗しました: ${result.error}`, 8000);
+                return;
+            }
+        }
+        button.setButtonText('Chrome でログイン').setDisabled(false);
+        browserStatusEl.setText('● タイムアウト');
+        browserStatusEl.style.color = '#ef4444';
     }
 
     private async startOAuthFlow(button: ButtonComponent, statusEl: HTMLElement): Promise<void> {

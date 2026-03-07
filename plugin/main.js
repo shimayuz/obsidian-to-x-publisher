@@ -184,6 +184,35 @@ var XPublisherClient = class {
       throw new Error(parsed.error || `HTTP ${response.status}`);
     }
   }
+  async startBrowserSetup() {
+    const response = await (0, import_obsidian.requestUrl)({
+      url: `${this.serverUrl}/session/browser-setup`,
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+      throw: false
+    });
+    if (response.status === 409)
+      return;
+    if (response.status === 503) {
+      const parsed = JSON.parse(response.text);
+      throw new Error(parsed.error || "Playwright \u304C\u5FC5\u8981\u3067\u3059");
+    }
+  }
+  async getBrowserSetupStatus() {
+    try {
+      const response = await (0, import_obsidian.requestUrl)({
+        url: `${this.serverUrl}/session/browser-setup/status`,
+        method: "GET",
+        throw: false
+      });
+      if (response.status !== 200)
+        return { status: "error", error: "\u30B9\u30C6\u30FC\u30BF\u30B9\u53D6\u5F97\u5931\u6557", sessionReady: false };
+      return JSON.parse(response.text);
+    } catch (e) {
+      return { status: "error", error: "\u30B5\u30FC\u30D0\u30FC\u306B\u63A5\u7D9A\u3067\u304D\u307E\u305B\u3093", sessionReady: false };
+    }
+  }
   async logout() {
     const response = await (0, import_obsidian.requestUrl)({
       url: `${this.serverUrl}/session/logout`,
@@ -445,6 +474,35 @@ var XPublisherSettingTab = class extends import_obsidian.PluginSettingTab {
       });
     });
     this.checkInitialStatus(statusEl, connectBtn, sessionStatusEl);
+    containerEl.createEl("h3", { text: "Playwright Chrome \u3067X \u306B\u30ED\u30B0\u30A4\u30F3\uFF08\u63A8\u5968\uFF09" });
+    const browserDescEl = containerEl.createEl("p", { cls: "setting-item-description" });
+    browserDescEl.style.cssText = "margin: 0 0 12px; font-size: 13px; color: var(--text-muted);";
+    browserDescEl.innerHTML = "\u2705 <b>\u3053\u306E\u65B9\u6CD5\u304C\u6700\u3082\u78BA\u5B9F\u3067\u3059\u3002</b><br>Chrome \u30A6\u30A3\u30F3\u30C9\u30A6\u304C\u958B\u304F\u306E\u3067 X \u306B\u30ED\u30B0\u30A4\u30F3\u3059\u308B\u3068\u3001Cookie \u304C\u81EA\u52D5\u53D6\u5F97\u3055\u308C\u307E\u3059\u3002<br>\u3059\u3067\u306B\u30ED\u30B0\u30A4\u30F3\u6E08\u307F\u306E\u5834\u5408\u306F\u6570\u79D2\u3067\u81EA\u52D5\u5B8C\u4E86\u3057\u307E\u3059\u3002<br><small>\u203B DevTools \u3067\u306E\u30B3\u30D4\u30FC\u4E0D\u8981\u3002\u521D\u56DE\u307E\u305F\u306F Chrome \u30D7\u30ED\u30D5\u30A1\u30A4\u30EB\u3092\u30EA\u30BB\u30C3\u30C8\u3057\u305F\u5F8C\u306B\u4F7F\u7528\u3002</small>";
+    const browserStatusEl = containerEl.createDiv();
+    browserStatusEl.style.cssText = "padding: 4px 0 12px; font-size: 13px;";
+    browserStatusEl.setText("\u25CF \u5F85\u6A5F\u4E2D");
+    browserStatusEl.style.color = "var(--text-muted)";
+    new import_obsidian.Setting(containerEl).setName("Chrome \u3067\u30ED\u30B0\u30A4\u30F3").setDesc("Chrome \u304C\u8D77\u52D5\u3057\u307E\u3059\u3002X \u306B\u30ED\u30B0\u30A4\u30F3\u3059\u308B\u3068\u81EA\u52D5\u3067\u30BB\u30C3\u30B7\u30E7\u30F3\u304C\u8A2D\u5B9A\u3055\u308C\u307E\u3059").addButton((button) => {
+      button.setButtonText("Chrome \u3067\u30ED\u30B0\u30A4\u30F3").setCta().onClick(async () => {
+        const isServerUp = await this.plugin.xClient.healthCheck();
+        if (!isServerUp) {
+          new import_obsidian.Notice("\u30B5\u30FC\u30D0\u30FC\u304C\u8D77\u52D5\u3057\u3066\u3044\u307E\u305B\u3093\u3002npm run server \u3092\u5B9F\u884C\u3057\u3066\u304F\u3060\u3055\u3044\u3002", 6e3);
+          return;
+        }
+        button.setButtonText("Chrome \u8D77\u52D5\u4E2D...").setDisabled(true);
+        browserStatusEl.setText("\u25CF Chrome \u3092\u8D77\u52D5\u3057\u3066\u3044\u307E\u3059...");
+        browserStatusEl.style.color = "#f59e0b";
+        try {
+          await this.plugin.xClient.startBrowserSetup();
+          new import_obsidian.Notice("Chrome \u304C\u8D77\u52D5\u3057\u307E\u3057\u305F\u3002X \u306B\u30ED\u30B0\u30A4\u30F3\u3057\u3066\u304F\u3060\u3055\u3044\uFF08\u3059\u3067\u306B\u30ED\u30B0\u30A4\u30F3\u6E08\u307F\u306E\u5834\u5408\u306F\u81EA\u52D5\u5B8C\u4E86\uFF09", 8e3);
+          await this.pollBrowserSetup(button, browserStatusEl, sessionStatusEl);
+        } catch (err) {
+          button.setButtonText("Chrome \u3067\u30ED\u30B0\u30A4\u30F3").setDisabled(false);
+          browserStatusEl.setText(`\u25CF \u30A8\u30E9\u30FC: ${err.message}`);
+          browserStatusEl.style.color = "#ef4444";
+        }
+      });
+    });
     containerEl.createEl("h3", { text: "\u52D5\u4F5C\u8A2D\u5B9A" });
     new import_obsidian.Setting(containerEl).setName("\u30D8\u30C3\u30C9\u30EC\u30B9\u30E2\u30FC\u30C9").setDesc("\u8A18\u4E8B\u6295\u7A3F\u6642\u306B\u30D6\u30E9\u30A6\u30B6\u3092\u975E\u8868\u793A\u3067\u5B9F\u884C\uFF08\u63A8\u5968: ON\uFF09").addToggle((toggle) => toggle.setValue(this.plugin.settings.headlessMode).onChange(async (value) => {
       this.plugin.settings = { ...this.plugin.settings, headlessMode: value };
@@ -512,6 +570,32 @@ var XPublisherSettingTab = class extends import_obsidian.PluginSettingTab {
       sessionStatusEl.setText("\u25CF \u672A\u8A2D\u5B9A\uFF08auth_token \u3092\u5165\u529B\u3057\u3066\u304F\u3060\u3055\u3044\uFF09");
       sessionStatusEl.style.color = "var(--text-muted)";
     }
+  }
+  async pollBrowserSetup(button, browserStatusEl, sessionStatusEl) {
+    const MAX_POLLS = 180;
+    for (let i = 0; i < MAX_POLLS; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 2e3));
+      const result = await this.plugin.xClient.getBrowserSetupStatus();
+      if (result.status === "success") {
+        button.setButtonText("Chrome \u3067\u30ED\u30B0\u30A4\u30F3").setDisabled(false);
+        browserStatusEl.setText("\u25CF \u30BB\u30C3\u30B7\u30E7\u30F3\u8A2D\u5B9A\u5B8C\u4E86 \u2705");
+        browserStatusEl.style.color = "#10b981";
+        sessionStatusEl.setText("\u25CF Cookie \u8A2D\u5B9A\u6E08\u307F \u2705\uFF08\u6295\u7A3F\u53EF\u80FD\uFF09");
+        sessionStatusEl.style.color = "#10b981";
+        new import_obsidian.Notice("\u2705 Chrome \u30ED\u30B0\u30A4\u30F3\u5B8C\u4E86\uFF01\u6295\u7A3F\u3067\u304D\u308B\u3088\u3046\u306B\u306A\u308A\u307E\u3057\u305F\u3002", 6e3);
+        return;
+      }
+      if (result.status === "error") {
+        button.setButtonText("Chrome \u3067\u30ED\u30B0\u30A4\u30F3").setDisabled(false);
+        browserStatusEl.setText(`\u25CF \u30A8\u30E9\u30FC: ${result.error || "\u4E0D\u660E\u306A\u30A8\u30E9\u30FC"}`);
+        browserStatusEl.style.color = "#ef4444";
+        new import_obsidian.Notice(`Chrome \u30ED\u30B0\u30A4\u30F3\u306B\u5931\u6557\u3057\u307E\u3057\u305F: ${result.error}`, 8e3);
+        return;
+      }
+    }
+    button.setButtonText("Chrome \u3067\u30ED\u30B0\u30A4\u30F3").setDisabled(false);
+    browserStatusEl.setText("\u25CF \u30BF\u30A4\u30E0\u30A2\u30A6\u30C8");
+    browserStatusEl.style.color = "#ef4444";
   }
   async startOAuthFlow(button, statusEl) {
     const { clientId, clientSecret } = this.plugin.settings;

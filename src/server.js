@@ -51,6 +51,14 @@ const oauth = {
     clientSecret: null
 };
 
+// ブラウザセッションセットアップ状態
+const browserSetup = {
+    status: 'idle', // 'idle' | 'running' | 'success' | 'error'
+    error: null
+};
+
+const PROFILE_DIR = path.join(__dirname, '../.x-chrome-profile');
+
 // ========================================
 // PKCE Helpers
 // ========================================
@@ -189,9 +197,10 @@ function renderCallbackPage(title, message, success) {
 app.get('/health', (req, res) => {
     res.json({
         status: 'ok',
-        version: '2.3.0',
+        version: '2.4.0',
         oauthConnected: !!process.env.X_ACCESS_TOKEN,
-        sessionReady: hasValidSession()
+        sessionReady: hasValidSession(),
+        browserSetupStatus: browserSetup.status
     });
 });
 
@@ -347,10 +356,91 @@ app.post('/session/cookies', (req, res) => {
 });
 
 // ========================================
-// Logout: Clear All Session Data
+// Browser Session Setup
 // ========================================
 
-app.post('/session/logout', async (req, res) => {
+app.post('/session/browser-setup', async (req, res) => {
+    if (!chromium) {
+        return res.status(503).json({ error: 'Playwright がインストールされていません。npm install を実行してください。' });
+    }
+    if (browserSetup.status === 'running') {
+        return res.status(409).json({ error: 'ブラウザが既に起動中です' });
+    }
+
+    browserSetup.status = 'running';
+    browserSetup.error = null;
+    res.json({ status: 'running' });
+
+    // バックグラウンドで実行
+    (async () => {
+        try {
+            const context = await chromium.launchPersistentContext(PROFILE_DIR, {
+                channel: 'chrome',
+                headless: false,
+                slowMo: 80,
+                args: ['--disable-blink-features=AutomationControlled'],
+                viewport: { width: 1280, height: 900 },
+                locale: 'ja-JP',
+                userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+            });
+
+            await context.addInitScript(() => {
+                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                Object.defineProperty(navigator, 'languages', { get: () => ['ja', 'en-US', 'en'] });
+            });
+
+            const page = await context.newPage();
+            // x.com に直接移動（ログイン済みなら即座に auth_token を検出）
+            await page.goto('https://x.com', { waitUntil: 'domcontentloaded' });
+            console.log('[BrowserSetup] Chrome を起動しました。ログインしていない場合は手動でログインしてください...');
+
+            // auth_token が現れるまでポーリング（最大5分）
+            let captured = false;
+            for (let i = 0; i < 150; i++) {
+                await new Promise(r => setTimeout(r, 2000));
+                try {
+                    const storageState = await context.storageState();
+                    const authToken = storageState.cookies?.find(
+                        c => c.name === 'auth_token' && c.value
+                    )?.value;
+                    if (authToken) {
+                        fs.writeFileSync(COOKIES_PATH, JSON.stringify(storageState, null, 2));
+                        updateEnvFile({ X_AUTH_TOKEN: authToken });
+                        const ct0 = storageState.cookies.find(c => c.name === 'ct0')?.value;
+                        if (ct0) updateEnvFile({ X_CSRF_TOKEN: ct0 });
+                        captured = true;
+                        console.log('[BrowserSetup] ✅ Cookie 取得完了！');
+                        break;
+                    }
+                } catch {}
+            }
+
+            await new Promise(r => setTimeout(r, 2000));
+            try { await context.close(); } catch {}
+
+            browserSetup.status = captured ? 'success' : 'error';
+            if (!captured) browserSetup.error = 'タイムアウト。ログインが完了しませんでした。';
+        } catch (err) {
+            browserSetup.status = 'error';
+            browserSetup.error = err.message;
+            console.error('[BrowserSetup] エラー:', err.message);
+        }
+    })();
+});
+
+app.get('/session/browser-setup/status', (req, res) => {
+    res.json({
+        status: browserSetup.status,
+        error: browserSetup.error,
+        sessionReady: hasValidSession()
+    });
+});
+
+// ========================================
+// Logout: OAuth トークンのみクリア（Chrome プロファイルは保持）
+// ========================================
+
+app.post('/session/logout', (req, res) => {
     // OAuth state をリセット
     Object.assign(oauth, {
         status: 'idle',
@@ -361,18 +451,7 @@ app.post('/session/logout', async (req, res) => {
         clientSecret: null
     });
 
-    // Chrome プロファイルディレクトリを削除
-    const profileDir = path.join(__dirname, '../.x-chrome-profile');
-    if (fs.existsSync(profileDir)) {
-        try {
-            fs.rmSync(profileDir, { recursive: true, force: true });
-            console.log('[Logout] Chrome プロファイルを削除しました');
-        } catch (e) {
-            console.warn('[Logout] プロファイル削除失敗:', e.message);
-        }
-    }
-
-    // Cookie ファイルを削除
+    // Cookie ファイルを削除（Chrome プロファイルは保持）
     if (fs.existsSync(COOKIES_PATH)) {
         try {
             fs.unlinkSync(COOKIES_PATH);
@@ -385,7 +464,26 @@ app.post('/session/logout', async (req, res) => {
     // .env からトークンを削除
     clearEnvKeys(['X_ACCESS_TOKEN', 'X_REFRESH_TOKEN', 'X_AUTH_TOKEN', 'X_CSRF_TOKEN']);
 
-    console.log('[Logout] ✅ ログアウト完了');
+    console.log('[Logout] ✅ OAuth ログアウト完了（Chrome プロファイルは保持）');
+    res.json({ success: true });
+});
+
+// Chrome プロファイルも含めた完全リセット
+app.post('/session/reset', (req, res) => {
+    Object.assign(oauth, { status: 'idle', error: null, codeVerifier: null, expectedState: null });
+    Object.assign(browserSetup, { status: 'idle', error: null });
+
+    if (fs.existsSync(PROFILE_DIR)) {
+        try {
+            fs.rmSync(PROFILE_DIR, { recursive: true, force: true });
+            console.log('[Reset] Chrome プロファイルを削除しました');
+        } catch (e) { console.warn('[Reset] プロファイル削除失敗:', e.message); }
+    }
+    if (fs.existsSync(COOKIES_PATH)) {
+        try { fs.unlinkSync(COOKIES_PATH); } catch {}
+    }
+    clearEnvKeys(['X_ACCESS_TOKEN', 'X_REFRESH_TOKEN', 'X_AUTH_TOKEN', 'X_CSRF_TOKEN']);
+    console.log('[Reset] ✅ 完全リセット完了');
     res.json({ success: true });
 });
 
