@@ -16,7 +16,7 @@ const express = require('express');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
-const { exec } = require('child_process');
+const { exec, spawn } = require('child_process');
 const dotenv = require('dotenv');
 
 let chromium;
@@ -356,6 +356,35 @@ app.post('/session/cookies', (req, res) => {
 });
 
 // ========================================
+// Browser Session Setup Helpers
+// ========================================
+
+const CHROME_PATHS_MAC = [
+    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+    '/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary',
+    '/Applications/Chromium.app/Contents/MacOS/Chromium',
+];
+
+function findChromeBinary() {
+    for (const p of CHROME_PATHS_MAC) {
+        if (fs.existsSync(p)) return p;
+    }
+    return null;
+}
+
+async function waitForChromeReady(port, maxMs = 15000) {
+    const deadline = Date.now() + maxMs;
+    while (Date.now() < deadline) {
+        try {
+            const resp = await fetch(`http://localhost:${port}/json/version`);
+            if (resp.ok) return true;
+        } catch {}
+        await new Promise(r => setTimeout(r, 300));
+    }
+    return false;
+}
+
+// ========================================
 // Browser Session Setup
 // ========================================
 
@@ -367,56 +396,68 @@ app.post('/session/browser-setup', async (req, res) => {
         return res.status(409).json({ error: 'ブラウザが既に起動中です' });
     }
 
+    const chromePath = findChromeBinary();
+    if (!chromePath) {
+        return res.status(503).json({ error: 'Google Chrome が見つかりません。Chrome をインストールしてください。' });
+    }
+
     browserSetup.status = 'running';
     browserSetup.error = null;
     res.json({ status: 'running' });
 
     // バックグラウンドで実行
     (async () => {
+        const CDP_PORT = 9222;
+        let chromeProc = null;
+        let browser = null;
         try {
-            const context = await chromium.launchPersistentContext(PROFILE_DIR, {
-                channel: 'chrome',
-                headless: false,
-                slowMo: 80,
-                args: ['--disable-blink-features=AutomationControlled'],
-                viewport: { width: 1280, height: 900 },
-                locale: 'ja-JP',
-                userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
-            });
+            // ★ Chrome を "普通に" 起動（Playwright 自動化フラグなし）
+            //   --enable-automation が付かないため navigator.webdriver = false
+            //   → X のボット検出をバイパス → パスワード入力が正常に表示される
+            chromeProc = spawn(chromePath, [
+                `--remote-debugging-port=${CDP_PORT}`,
+                `--user-data-dir=${PROFILE_DIR}`,
+                '--no-first-run',
+                '--no-default-browser-check',
+                '--disable-sync',
+                'https://x.com'
+            ], { stdio: 'ignore', detached: false });
 
-            await context.addInitScript(() => {
-                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-                Object.defineProperty(navigator, 'languages', { get: () => ['ja', 'en-US', 'en'] });
-            });
+            console.log('[BrowserSetup] Chrome を起動しました（bot 検出回避モード）。ログインしてください...');
 
-            const page = await context.newPage();
-            // x.com に直接移動（ログイン済みなら即座に auth_token を検出）
-            await page.goto('https://x.com', { waitUntil: 'domcontentloaded' });
-            console.log('[BrowserSetup] Chrome を起動しました。ログインしていない場合は手動でログインしてください...');
+            const ready = await waitForChromeReady(CDP_PORT, 15000);
+            if (!ready) throw new Error('Chrome の起動がタイムアウトしました');
+
+            // CDP 経由で接続（自動化フラグは注入されない）
+            browser = await chromium.connectOverCDP(`http://localhost:${CDP_PORT}`);
+            const contexts = browser.contexts();
+            const context = contexts.length > 0 ? contexts[0] : null;
+            if (!context) throw new Error('ブラウザコンテキストが見つかりません');
+
+            console.log('[BrowserSetup] X にログインするとクッキーが自動取得されます...');
 
             // auth_token が現れるまでポーリング（最大5分）
             let captured = false;
             for (let i = 0; i < 150; i++) {
                 await new Promise(r => setTimeout(r, 2000));
                 try {
-                    const storageState = await context.storageState();
-                    const authToken = storageState.cookies?.find(
-                        c => c.name === 'auth_token' && c.value
-                    )?.value;
+                    const cookies = await context.cookies();
+                    const authToken = cookies.find(c => c.name === 'auth_token' && c.value)?.value;
                     if (authToken) {
+                        const storageState = { cookies, origins: [] };
                         fs.writeFileSync(COOKIES_PATH, JSON.stringify(storageState, null, 2));
                         updateEnvFile({ X_AUTH_TOKEN: authToken });
-                        const ct0 = storageState.cookies.find(c => c.name === 'ct0')?.value;
+                        const ct0 = cookies.find(c => c.name === 'ct0')?.value;
                         if (ct0) updateEnvFile({ X_CSRF_TOKEN: ct0 });
                         captured = true;
-                        console.log('[BrowserSetup] ✅ Cookie 取得完了！');
+                        console.log('[BrowserSetup] ✅ Cookie 取得完了！ブラウザを閉じます。');
                         break;
                     }
                 } catch {}
             }
 
-            await new Promise(r => setTimeout(r, 2000));
-            try { await context.close(); } catch {}
+            try { await browser.close(); } catch {}
+            browser = null;
 
             browserSetup.status = captured ? 'success' : 'error';
             if (!captured) browserSetup.error = 'タイムアウト。ログインが完了しませんでした。';
@@ -424,6 +465,9 @@ app.post('/session/browser-setup', async (req, res) => {
             browserSetup.status = 'error';
             browserSetup.error = err.message;
             console.error('[BrowserSetup] エラー:', err.message);
+        } finally {
+            if (browser) { try { await browser.close(); } catch {} }
+            if (chromeProc) { try { chromeProc.kill('SIGTERM'); } catch {} }
         }
     })();
 });
@@ -526,7 +570,7 @@ app.post('/publish', async (req, res) => {
 // ========================================
 
 app.listen(PORT, '127.0.0.1', () => {
-    console.log(`\n[X Publisher Server] v2.3.0 起動`);
+    console.log(`\n[X Publisher Server] v2.5.0 起動`);
     console.log(`[X Publisher Server] http://127.0.0.1:${PORT}/health`);
     console.log(`[X Publisher Server] OAuth コールバック: ${REDIRECT_URI}\n`);
 
