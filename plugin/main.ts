@@ -177,11 +177,23 @@ class XPublisherClient {
         try {
             const response = await requestUrl({
                 url: `${this.serverUrl}/oauth/status`,
-                method: 'GET'
+                method: 'GET',
+                throw: false
             });
-            return JSON.parse(response.text) as OAuthStatus;
+
+            if (response.status !== 200) {
+                return { status: 'error', error: 'サーバーを再起動してください（npm run server）', authenticated: false };
+            }
+
+            // Guard against non-JSON responses (e.g. old server returning HTML)
+            const text = response.text?.trim() ?? '';
+            if (!text.startsWith('{')) {
+                return { status: 'error', error: 'サーバーを再起動してください（npm run server）', authenticated: false };
+            }
+
+            return JSON.parse(text) as OAuthStatus;
         } catch {
-            return { status: 'error', error: 'サーバーに接続できません', authenticated: false };
+            return { status: 'error', error: 'サーバーが起動していません（npm run server）', authenticated: false };
         }
     }
 
