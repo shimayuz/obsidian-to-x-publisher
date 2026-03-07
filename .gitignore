@@ -7,6 +7,7 @@ x-cookies.json
 # Playwright ブラウザプロファイル
 .x-publisher-chrome/
 playwright-profile/
+.x-chrome-profile/
 
 # 依存パッケージ
 node_modules/

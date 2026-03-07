@@ -797,131 +797,121 @@ async function saveDraft(page) {
  * @param {boolean} params.headless
  * @returns {Promise<{articleUrl: string}>}
  */
+/**
+ * ページに Markdown の各要素を入力する（コンテキスト非依存のメインロジック）
+ */
+async function publishContent(page, title, markdown, images) {
+    await createNewArticle(page);
+    await setTitle(page, title);
+    await focusBody(page);
+    await page.waitForTimeout(500);
+
+    const elements = parseMarkdownElements(markdown);
+    console.log(`[Publisher] 要素数: ${elements.length}`);
+
+    const imageMap = new Map();
+    for (const img of images) {
+        if (img.absolutePath && fs.existsSync(img.absolutePath)) {
+            imageMap.set(img.fileName, img.absolutePath);
+        }
+    }
+
+    for (const element of elements) {
+        switch (element.type) {
+            case 'heading':      await insertHeading(page, element.content, element.level); break;
+            case 'paragraph':    await insertParagraph(page, element.content); break;
+            case 'bulletList':   await insertBulletList(page, element.items); break;
+            case 'numberedList': await insertNumberedList(page, element.items); break;
+            case 'quote':        await insertBlockquote(page, element.content); break;
+            case 'code':         await insertCode(page, element.content); break;
+            case 'divider':      await insertDivider(page); break;
+            case 'image': {
+                const imgPath = imageMap.get(element.fileName);
+                if (imgPath) await insertImage(page, imgPath);
+                else console.warn(`[Publisher] ⚠️  画像スキップ: ${element.fileName}`);
+                break;
+            }
+        }
+        await page.waitForTimeout(150);
+    }
+
+    return await saveDraft(page);
+}
+
 async function publishToX({ title, markdown, images = [], headless = true }) {
     console.log('\n[Publisher] X Articles 投稿開始');
     console.log(`[Publisher] タイトル: "${title}"`);
     console.log(`[Publisher] 画像数: ${images.length}`);
 
-    // Cookie の存在確認
-    if (!fs.existsSync(COOKIES_PATH)) {
-        throw new Error(`x-cookies.json が見つかりません。先に npm run login を実行してください。`);
+    const profileDir = path.join(__dirname, '../.x-chrome-profile');
+    const antiBot = () => {
+        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+        Object.defineProperty(navigator, 'languages', { get: () => ['ja', 'en-US', 'en'] });
+    };
+
+    // ─── 優先: 専用プロファイルの Chrome（OAuth でログイン済みのセッションを再利用）
+    try {
+        const ctx = await chromium.launchPersistentContext(profileDir, {
+            channel: 'chrome',
+            headless,
+            slowMo: 80,
+            args: ['--disable-blink-features=AutomationControlled'],
+            viewport: { width: 1280, height: 900 },
+            locale: 'ja-JP',
+            userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+        });
+        await ctx.addInitScript(antiBot);
+        console.log('[Publisher] 専用プロファイルの Chrome で投稿');
+
+        const page = await ctx.newPage();
+        page.setDefaultTimeout(60000);
+        try {
+            const articleUrl = await publishContent(page, title, markdown, images);
+            return { articleUrl };
+        } finally {
+            await ctx.close();
+        }
+    } catch (profileErr) {
+        console.warn('[Publisher] 専用プロファイル失敗、Cookie ファイルで再試行:', profileErr.message);
     }
 
-    // ブラウザ起動 — 本物の Chrome を優先（ボット検出回避）
+    // ─── フォールバック: x-cookies.json の Cookie で Chromium 起動
+    if (!fs.existsSync(COOKIES_PATH)) {
+        throw new Error('セッション Cookie が設定されていません。プラグイン設定から「連携する」を実行してください。');
+    }
+
+    const storageState = JSON.parse(fs.readFileSync(COOKIES_PATH, 'utf-8'));
+
     let browser;
     try {
         browser = await chromium.launch({
             channel: 'chrome',
             headless,
-            slowMo: 100,
+            slowMo: 80,
             args: ['--disable-blink-features=AutomationControlled']
         });
-        console.log('[Publisher] Chrome でブラウザ起動');
     } catch {
-        // Chrome が未インストールの場合は Playwright 同梱 Chromium を使用
         browser = await chromium.launch({
             headless,
-            slowMo: 100,
-            args: [
-                '--disable-blink-features=AutomationControlled',
-                '--disable-infobars',
-                '--no-sandbox'
-            ],
+            slowMo: 80,
+            args: ['--disable-blink-features=AutomationControlled', '--no-sandbox'],
             ignoreDefaultArgs: ['--enable-automation']
         });
-        console.log('[Publisher] Chromium でブラウザ起動（Chrome が見つかりません）');
     }
 
-    const storageState = JSON.parse(fs.readFileSync(COOKIES_PATH, 'utf-8'));
     const context = await browser.newContext({
         storageState,
         viewport: { width: 1280, height: 900 },
         locale: 'ja-JP',
         userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
     });
+    await context.addInitScript(antiBot);
 
     const page = await context.newPage();
     page.setDefaultTimeout(60000);
 
-    // navigator.webdriver を隠してボット検出を回避
-    await page.addInitScript(() => {
-        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-        Object.defineProperty(navigator, 'languages', { get: () => ['ja', 'en-US', 'en'] });
-        Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-        // eslint-disable-next-line no-undef
-        window.chrome = {
-            runtime: {},
-            loadTimes: function () { },
-            csi: function () { },
-            app: {}
-        };
-    });
-
     try {
-        // 新規記事ページへ移動
-        await createNewArticle(page);
-
-        // タイトル入力
-        await setTitle(page, title);
-
-        // 本文エリアにフォーカス
-        await focusBody(page);
-        await page.waitForTimeout(500);
-
-        // Markdown を解析して要素配列に変換
-        const elements = parseMarkdownElements(markdown);
-        console.log(`[Publisher] 要素数: ${elements.length}`);
-
-        // 画像ファイルのマッピング（fileName → absolutePath）
-        const imageMap = new Map();
-        for (const img of images) {
-            if (img.absolutePath && fs.existsSync(img.absolutePath)) {
-                imageMap.set(img.fileName, img.absolutePath);
-            }
-        }
-
-        // 各要素を順番に入力
-        for (const element of elements) {
-            switch (element.type) {
-                case 'heading':
-                    await insertHeading(page, element.content, element.level);
-                    break;
-                case 'paragraph':
-                    await insertParagraph(page, element.content);
-                    break;
-                case 'bulletList':
-                    await insertBulletList(page, element.items);
-                    break;
-                case 'numberedList':
-                    await insertNumberedList(page, element.items);
-                    break;
-                case 'quote':
-                    await insertBlockquote(page, element.content);
-                    break;
-                case 'code':
-                    await insertCode(page, element.content);
-                    break;
-                case 'divider':
-                    await insertDivider(page);
-                    break;
-                case 'image': {
-                    const imgPath = imageMap.get(element.fileName);
-                    if (imgPath) {
-                        await insertImage(page, imgPath);
-                    } else {
-                        console.warn(`[Publisher] ⚠️  画像スキップ: ${element.fileName}`);
-                    }
-                    break;
-                }
-                default:
-                    break;
-            }
-            await page.waitForTimeout(150);
-        }
-
-        // 下書き保存
-        const articleUrl = await saveDraft(page);
-
+        const articleUrl = await publishContent(page, title, markdown, images);
         return { articleUrl };
     } finally {
         await browser.close();

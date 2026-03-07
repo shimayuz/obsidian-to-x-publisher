@@ -73,21 +73,49 @@ function generateState() {
 // ========================================
 
 async function launchOAuthBrowser(url) {
-    // システムブラウザ（Safari/Chrome）で開く
-    // Playwright 経由だと X にボット検出されてログインが通らないため
-    console.log('[OAuth] システムブラウザで認証フローを開始します...');
-    const openCmd = process.platform === 'win32' ? `start "" "${url}"`
-                  : process.platform === 'linux'  ? `xdg-open "${url}"`
-                  : `open "${url}"`;
+    if (!chromium) {
+        // playwright 未インストール時はシステムブラウザにフォールバック
+        console.log('[OAuth] システムブラウザで認証フローを開始します...');
+        const openCmd = process.platform === 'win32' ? `start "" "${url}"`
+                      : process.platform === 'linux'  ? `xdg-open "${url}"`
+                      : `open "${url}"`;
+        exec(openCmd, () => {});
+        return;
+    }
 
-    await new Promise((resolve, reject) => {
-        exec(openCmd, (err) => {
-            if (err) reject(err);
-            else resolve();
+    // 専用プロファイルディレクトリ（ログイン状態を保持）
+    const profileDir = path.join(__dirname, '../.x-chrome-profile');
+
+    try {
+        const context = await chromium.launchPersistentContext(profileDir, {
+            channel: 'chrome',
+            headless: false,
+            slowMo: 50,
+            args: ['--disable-blink-features=AutomationControlled'],
+            viewport: { width: 1280, height: 900 },
+            locale: 'ja-JP',
+            userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
         });
-    });
 
-    console.log('[OAuth] ブラウザを開きました。X.com でログインして「許可」をクリックしてください...');
+        await context.addInitScript(() => {
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            Object.defineProperty(navigator, 'languages', { get: () => ['ja', 'en-US', 'en'] });
+        });
+
+        oauth.browserContext = context;
+
+        const page = await context.newPage();
+        await page.goto(url, { waitUntil: 'domcontentloaded' });
+
+        console.log('[OAuth] Chrome が起動しました。X にログインして「許可」をクリックしてください...');
+    } catch (err) {
+        console.warn('[OAuth] Chrome 起動失敗。システムブラウザで開きます:', err.message);
+        oauth.browserContext = null;
+        const openCmd = process.platform === 'win32' ? `start "" "${url}"`
+                      : process.platform === 'linux'  ? `xdg-open "${url}"`
+                      : `open "${url}"`;
+        exec(openCmd, () => {});
+    }
 }
 
 // ========================================
@@ -273,22 +301,50 @@ app.get('/oauth/callback', async (req, res) => {
             X_REFRESH_TOKEN: tokens.refresh_token || ''
         });
         console.log('[OAuth] ✅ Bearer トークン取得完了');
+
+        // Playwright コンテキストから Cookie を自動キャプチャ
+        let cookiesCaptured = false;
+        if (oauth.browserContext) {
+            try {
+                await new Promise(r => setTimeout(r, 800));
+                const storageState = await oauth.browserContext.storageState();
+                const authToken = storageState.cookies?.find(c => c.name === 'auth_token' && c.value)?.value;
+                if (authToken) {
+                    fs.writeFileSync(COOKIES_PATH, JSON.stringify(storageState, null, 2));
+                    updateEnvFile({ X_AUTH_TOKEN: authToken });
+                    const ct0 = storageState.cookies.find(c => c.name === 'ct0')?.value;
+                    if (ct0) updateEnvFile({ X_CSRF_TOKEN: ct0 });
+                    cookiesCaptured = true;
+                    console.log('[OAuth] ✅ Cookie 自動取得完了 (auth_token, ct0)');
+                }
+            } catch (e) {
+                console.warn('[OAuth] Cookie 自動取得失敗:', e.message);
+            }
+
+            const ctx = oauth.browserContext;
+            oauth.browserContext = null;
+            setTimeout(async () => {
+                try { await ctx.close(); } catch {}
+            }, 3000);
+        }
+
         Object.assign(oauth, { status: 'success', error: null });
 
         res.send(renderCallbackPage(
             '✅ OAuth 認証完了',
-            'このタブを閉じて Obsidian に戻ってください。<br><br>' +
-            '<b>次のステップ：セッション Cookie を設定する</b><br><br>' +
-            'このブラウザで <a href="https://x.com" target="_blank">x.com</a> にアクセスし、<br>' +
-            '開発者ツール（Mac: <code>Cmd+Option+I</code>）→ ' +
-            '<b>Application</b> → <b>Cookies</b> → <b>.x.com</b> を開いて<br>' +
-            '<code>auth_token</code> と <code>ct0</code> の値をコピーし、<br>' +
-            'Obsidian プラグイン設定の「セッション Cookie 設定」に貼り付けてください。',
+            cookiesCaptured
+                ? 'このタブを閉じて Obsidian に戻ってください。<br>投稿できるようになりました！'
+                : 'このタブを閉じて Obsidian に戻ってください。<br>Cookie 設定の「保存する」から auth_token を手動入力してください。',
             true
         ));
     } catch (err) {
         Object.assign(oauth, { status: 'error', error: err.message });
         console.error('[OAuth] コールバックエラー:', err.message);
+        if (oauth.browserContext) {
+            const ctx = oauth.browserContext;
+            oauth.browserContext = null;
+            setTimeout(async () => { try { await ctx.close(); } catch {} }, 1000);
+        }
         res.send(renderCallbackPage('❌ エラー', err.message, false));
     }
 });
