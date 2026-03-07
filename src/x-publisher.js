@@ -220,21 +220,23 @@ function extractTitle(markdown, fileName) {
  * @param {import('playwright').Page} page
  */
 async function createNewArticle(page) {
-    console.log('[Publisher] X Articles ページへ移動...');
+    console.log('[Publisher] X Articles 記事作成ページへ移動...');
 
-    // ① 記事一覧ページへ
-    await page.goto('https://x.com/i/articles', { waitUntil: 'domcontentloaded', timeout: 30000 });
+    // 正しい URL: https://x.com/compose/articles
+    // エディタは https://x.com/compose/articles/edit/{articleId} に移動する
+    await page.goto('https://x.com/compose/articles', { waitUntil: 'domcontentloaded', timeout: 30000 });
     await page.waitForTimeout(2000);
     await page.waitForLoadState('networkidle').catch(() => {});
 
     // ログインリダイレクトを検出
     const afterListUrl = page.url();
-    console.log(`[Publisher] 記事一覧URL: ${afterListUrl}`);
-    if (afterListUrl.includes('/login') || afterListUrl.includes('/i/flow/login') || afterListUrl.includes('/flow/')) {
-        throw new Error('セッションが期限切れです。Obsidian 設定から再度「連携する」を実行してください。');
+    console.log(`[Publisher] 現在のURL: ${afterListUrl}`);
+    if (afterListUrl.includes('/login') || afterListUrl.includes('/i/flow/login') || afterListUrl.includes('/flow/login')) {
+        throw new Error('セッションが期限切れです。Obsidian 設定からログアウト後に再度「連携する」を実行してください。');
     }
 
-    // ② 「記事を作成」ボタンをクリック
+    // 「記事を作成」ボタンをクリックして新規記事を開く
+    // URL が compose/articles/edit/{id} に変わるまで待つ
     const createBtnSelectors = [
         'button:has-text("記事を作成")',
         'button:has-text("Create article")',
@@ -257,27 +259,25 @@ async function createNewArticle(page) {
     }
 
     if (!createBtnClicked) {
-        // フォールバック: /new に直接アクセス
-        console.warn('[Publisher] 「記事を作成」ボタンが見つからず、直接 /new へ移動します');
-        await page.goto('https://x.com/i/articles/new', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
-        await page.waitForTimeout(2000);
+        console.warn('[Publisher] 「記事を作成」ボタンが見つかりません。エディタを直接待ちます...');
     }
 
-    // ③ エディタが表示されるまで待つ
+    // エディタページ（compose/articles/edit/{id}）への移動を待つ
     await page.waitForTimeout(2000);
     await page.waitForLoadState('networkidle').catch(() => {});
 
-    const afterEditorUrl = page.url();
-    console.log(`[Publisher] エディタURL: ${afterEditorUrl}`);
-    if (afterEditorUrl.includes('/login') || afterEditorUrl.includes('/i/flow/login')) {
-        throw new Error('セッションが期限切れです。Obsidian 設定から再度「連携する」を実行してください。');
+    const editorUrl = page.url();
+    console.log(`[Publisher] エディタURL: ${editorUrl}`);
+    if (editorUrl.includes('/login') || editorUrl.includes('/flow/login')) {
+        throw new Error('セッションが期限切れです。Obsidian 設定からログアウト後に再度「連携する」を実行してください。');
     }
 
+    // エディタ（contenteditable）が現れるまで待つ
+    // タイトル欄と本文欄の両方が contenteditable
     const editorSelectors = [
         '[contenteditable="true"]',
         'div.public-DraftEditor-content',
-        '[contenteditable="true"][role="textbox"]',
-        '[data-testid="article-body"]'
+        '[data-testid="article-body"] [contenteditable="true"]'
     ];
 
     let foundSelector = null;
@@ -315,14 +315,15 @@ async function createNewArticle(page) {
 async function setTitle(page, title) {
     console.log(`[Publisher] タイトル入力: "${title}"`);
 
-    // タイトル入力エリアを探す（placeholder="Title" など）
+    // タイトル欄: placeholder "タイトルを追加" または "Add title" など
     const titleSelectors = [
         '[data-testid="article-title"]',
-        'textarea[placeholder*="Title"]',
+        '[contenteditable="true"][data-placeholder*="タイトル"]',
+        '[contenteditable="true"][data-placeholder*="Title"]',
+        'div[contenteditable="true"][aria-label*="タイトル"]',
+        'div[contenteditable="true"][aria-label*="Title"]',
         'textarea[placeholder*="タイトル"]',
-        '[aria-label*="Title"]',
-        '[aria-label*="タイトル"]',
-        '[contenteditable="true"][aria-label*="Title"]'
+        'textarea[placeholder*="Title"]'
     ];
 
     let titleInput = null;
@@ -330,18 +331,22 @@ async function setTitle(page, title) {
         const el = page.locator(selector).first();
         if (await el.isVisible().catch(() => false)) {
             titleInput = el;
+            console.log(`[Publisher] タイトル欄検出: ${selector}`);
             break;
         }
     }
 
     if (titleInput) {
         await titleInput.click();
+        await page.waitForTimeout(200);
         await titleInput.fill(title);
     } else {
         // フォールバック: 最初の contenteditable をタイトルとして使用
         const firstEditable = page.locator('[contenteditable="true"]').first();
         await firstEditable.click();
-        await firstEditable.fill(title);
+        await page.waitForTimeout(200);
+        // fill ではなく type を使う（DraftEditor は fill が機能しないことがある）
+        await page.keyboard.type(title);
     }
 
     await page.waitForTimeout(500);
@@ -352,9 +357,13 @@ async function setTitle(page, title) {
  * @param {import('playwright').Page} page
  */
 async function focusBody(page) {
-    // 本文エリア（タイトル以外の contenteditable）
+    // 本文エリア: タイトル欄の次の contenteditable
+    // X Articles では「記事の作成を開始」というプレースホルダーがある
     const bodySelectors = [
         '[data-testid="article-body"]',
+        '[contenteditable="true"][data-placeholder*="記事の作成"]',
+        '[contenteditable="true"][data-placeholder*="Start writing"]',
+        '[contenteditable="true"][data-placeholder*="Body"]',
         '[role="textbox"][aria-label*="Body"]',
         '[role="textbox"][aria-label*="本文"]'
     ];
@@ -363,11 +372,12 @@ async function focusBody(page) {
         const el = page.locator(selector).first();
         if (await el.isVisible().catch(() => false)) {
             await el.click();
+            await page.waitForTimeout(300);
             return;
         }
     }
 
-    // フォールバック: 2番目の contenteditable（タイトルの次）
+    // フォールバック: 2番目の contenteditable（タイトルの次が本文）
     const editables = page.locator('[contenteditable="true"]');
     const count = await editables.count();
     if (count >= 2) {
@@ -386,7 +396,9 @@ async function focusBody(page) {
  * @returns {Promise<boolean>}
  */
 async function clickToolbarButton(page, labelOrText) {
+    // X Articles のツールバーはページ上部に固定されている
     const selectors = [
+        `[data-testid="toolBar"] button[aria-label*="${labelOrText}"]`,
         `[data-testid="toolbar"] button[aria-label*="${labelOrText}"]`,
         `[role="toolbar"] button[aria-label*="${labelOrText}"]`,
         `button[aria-label*="${labelOrText}"]`,
@@ -413,33 +425,52 @@ async function clickToolbarButton(page, labelOrText) {
 async function insertHeading(page, text, level) {
     console.log(`[Publisher] 見出し H${level}: "${text}"`);
 
-    // ツールバーの "Heading" ボタンを探してクリック
-    const headingBtn = page.locator('[aria-label*="Heading"], [aria-label*="見出し"]').first();
-    const hasHeadingBtn = await headingBtn.isVisible().catch(() => false);
+    // X Articles ツールバーの「本文」ドロップダウンから見出しを選択
+    // スクリーンショットで確認: ツールバーに「本文」ボタンがあり、クリックするとドロップダウン
+    const styleDropdownSelectors = [
+        'button:has-text("本文")',
+        'button:has-text("Body")',
+        '[data-testid="toolBar"] button[aria-label*="Heading"]',
+        '[aria-label*="テキストスタイル"]',
+        '[aria-label*="text style"]'
+    ];
 
-    if (hasHeadingBtn) {
-        await headingBtn.click();
-        await page.waitForTimeout(300);
+    let dropdownOpened = false;
+    for (const selector of styleDropdownSelectors) {
+        const el = page.locator(selector).first();
+        if (await el.isVisible().catch(() => false)) {
+            await el.click();
+            await page.waitForTimeout(400);
+            dropdownOpened = true;
+            break;
+        }
+    }
 
-        // ドロップダウンから選択
-        const menuText = level === 2 ? ['Heading 1', 'H1', '大見出し'] : ['Heading 2', 'H2', '小見出し'];
+    if (dropdownOpened) {
+        // level 2 → 大見出し（Heading 1）、level 3 → 小見出し（Heading 2）
+        const menuCandidates = level === 2
+            ? ['大見出し', 'Heading 1', 'H1', '見出し1']
+            : ['小見出し', 'Heading 2', 'H2', '見出し2'];
+
         let selected = false;
-        for (const text_ of menuText) {
-            const item = page.locator(`[role="menuitem"]:has-text("${text_}"), [role="option"]:has-text("${text_}")`).first();
+        for (const label of menuCandidates) {
+            const item = page.locator(
+                `[role="menuitem"]:has-text("${label}"), [role="option"]:has-text("${label}"), li:has-text("${label}")`
+            ).first();
             if (await item.isVisible().catch(() => false)) {
                 await item.click();
                 selected = true;
+                await page.waitForTimeout(300);
                 break;
             }
         }
 
         if (!selected) {
-            // ドロップダウンが機能しなかった場合、Escape してキーボードショートカット試行
             await page.keyboard.press('Escape');
         }
     }
 
-    // テキストを入力
+    // テキストを入力して改行
     await page.keyboard.type(text);
     await page.keyboard.press('Enter');
     await page.keyboard.press('Enter'); // 通常段落に戻る
@@ -781,25 +812,18 @@ async function insertImage(page, imagePath) {
 async function saveDraft(page) {
     console.log('[Publisher] 下書き保存中...');
 
-    // Save / 保存 ボタンを探す
-    const saveBtnSelectors = [
-        'button:has-text("Save")',
-        'button:has-text("保存")',
-        '[data-testid="articleSave"]',
-        '[aria-label*="Save"]'
-    ];
+    // X Articles は自動保存される（「前回の保存: たった今」と表示）
+    // URL が compose/articles/edit/{id} になるのを待つ
+    await page.waitForTimeout(2000);
 
-    for (const selector of saveBtnSelectors) {
-        const btn = page.locator(selector).first();
-        if (await btn.isVisible().catch(() => false) && await btn.isEnabled().catch(() => false)) {
-            await btn.click();
-            await page.waitForTimeout(3000);
-            break;
-        }
+    // URL に記事 ID が含まれているか確認
+    let currentUrl = page.url();
+    if (!currentUrl.includes('/edit/')) {
+        // まだ ID がない場合は少し待つ
+        await page.waitForTimeout(3000);
+        currentUrl = page.url();
     }
 
-    // 現在の URL を取得（記事 ID が含まれる）
-    const currentUrl = page.url();
     console.log(`[Publisher] 保存完了: ${currentUrl}`);
     return currentUrl;
 }
