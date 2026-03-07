@@ -1,4 +1,4 @@
-import { App, Modal, Notice, Plugin, PluginSettingTab, Setting, TFile, requestUrl } from 'obsidian';
+import { App, ButtonComponent, Modal, Notice, Plugin, PluginSettingTab, Setting, TFile, requestUrl } from 'obsidian';
 import * as path from 'path';
 
 // ========================================
@@ -7,6 +7,8 @@ import * as path from 'path';
 
 interface XPublisherSettings {
     serverUrl: string;
+    clientId: string;
+    clientSecret: string;
     headlessMode: boolean;
     openAfterPublish: boolean;
     showNotification: boolean;
@@ -14,6 +16,8 @@ interface XPublisherSettings {
 
 const DEFAULT_SETTINGS: XPublisherSettings = {
     serverUrl: 'http://127.0.0.1:3001',
+    clientId: '',
+    clientSecret: '',
     headlessMode: true,
     openAfterPublish: true,
     showNotification: true
@@ -35,6 +39,12 @@ interface PublishResult {
     success: boolean;
     articleUrl?: string;
     error?: string;
+}
+
+interface OAuthStatus {
+    status: 'idle' | 'pending' | 'success' | 'error';
+    error: string | null;
+    authenticated: boolean;
 }
 
 // ========================================
@@ -142,6 +152,39 @@ class XPublisherClient {
         }
     }
 
+    async startOAuth(clientId: string, clientSecret?: string): Promise<void> {
+        const body: Record<string, string> = { clientId };
+        if (clientSecret) body.clientSecret = clientSecret;
+
+        const response = await requestUrl({
+            url: `${this.serverUrl}/oauth/start`,
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+            throw: false
+        });
+
+        // 409 = already pending → OK to just poll
+        if (response.status === 409) return;
+
+        if (response.status !== 200) {
+            const parsed = JSON.parse(response.text);
+            throw new Error(parsed.error || `HTTP ${response.status}`);
+        }
+    }
+
+    async getOAuthStatus(): Promise<OAuthStatus> {
+        try {
+            const response = await requestUrl({
+                url: `${this.serverUrl}/oauth/status`,
+                method: 'GET'
+            });
+            return JSON.parse(response.text) as OAuthStatus;
+        } catch {
+            return { status: 'error', error: 'サーバーに接続できません', authenticated: false };
+        }
+    }
+
     async publish(params: {
         title: string;
         markdown: string;
@@ -170,15 +213,9 @@ class XPublisherClient {
             }
 
             const result = JSON.parse(response.text);
-            return {
-                success: true,
-                articleUrl: result.articleUrl
-            };
+            return { success: true, articleUrl: result.articleUrl };
         } catch (error: any) {
-            return {
-                success: false,
-                error: error.message || 'Unknown error'
-            };
+            return { success: false, error: error.message || 'Unknown error' };
         }
     }
 }
@@ -209,9 +246,7 @@ function extractTitle(content: string, file: TFile, cache: any): string {
 }
 
 function prepareBody(content: string): string {
-    // Frontmatter 除去
-    let body = content.replace(/^---\s*\n[\s\S]*?\n---\s*\n?/, '');
-    return body.trim();
+    return content.replace(/^---\s*\n[\s\S]*?\n---\s*\n?/, '').trim();
 }
 
 async function extractImages(app: App, content: string, file: TFile): Promise<ImageInfo[]> {
@@ -223,8 +258,7 @@ async function extractImages(app: App, content: string, file: TFile): Promise<Im
     const obsidianRegex = /!\[\[([^\]|]+)(?:\|[^\]]+)?\]\]/g;
     let match;
     while ((match = obsidianRegex.exec(content)) !== null) {
-        const fileName = match[1].trim();
-        const info = resolveImageFile(app, fileName, fileDir, vaultPath);
+        const info = resolveImageFile(app, match[1].trim(), fileDir, vaultPath);
         if (info) images.push(info);
     }
 
@@ -243,14 +277,12 @@ async function extractImages(app: App, content: string, file: TFile): Promise<Im
 function resolveImageFile(app: App, imagePath: string, baseDir: string, vaultPath: string): ImageInfo | null {
     const fileName = path.basename(imagePath);
 
-    // Obsidian のリンク解決
     const linkedFile = app.metadataCache.getFirstLinkpathDest(imagePath, baseDir);
     if (linkedFile && linkedFile instanceof TFile) {
         const absolutePath = vaultPath ? `${vaultPath}/${linkedFile.path}` : linkedFile.path;
         return { fileName, absolutePath, exists: true };
     }
 
-    // Vault 内の直接パス
     const directFile = app.vault.getAbstractFileByPath(imagePath);
     if (directFile && directFile instanceof TFile) {
         const absolutePath = vaultPath ? `${vaultPath}/${directFile.path}` : directFile.path;
@@ -302,10 +334,7 @@ class PublishConfirmModal extends Modal {
             .setDesc(preview + (this.parsedNote.body.length > 200 ? '...' : ''));
 
         const btnContainer = contentEl.createDiv();
-        btnContainer.style.display = 'flex';
-        btnContainer.style.gap = '8px';
-        btnContainer.style.justifyContent = 'flex-end';
-        btnContainer.style.marginTop = '16px';
+        btnContainer.style.cssText = 'display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px;';
 
         const cancelBtn = btnContainer.createEl('button', { text: 'キャンセル' });
         cancelBtn.addEventListener('click', () => {
@@ -334,6 +363,7 @@ class PublishConfirmModal extends Modal {
 
 class XPublisherSettingTab extends PluginSettingTab {
     plugin: XPublisherPlugin;
+    private pollingActive = false;
 
     constructor(app: App, plugin: XPublisherPlugin) {
         super(app, plugin);
@@ -341,24 +371,75 @@ class XPublisherSettingTab extends PluginSettingTab {
     }
 
     display(): void {
+        this.pollingActive = false; // Cancel any running polling
+
         const { containerEl } = this;
         containerEl.empty();
         containerEl.createEl('h2', { text: 'X Article Publisher 設定' });
 
+        // ─── X Developer App ───
+        containerEl.createEl('h3', { text: 'X Developer App' });
+
+        const descEl = containerEl.createEl('p', { cls: 'setting-item-description' });
+        descEl.style.cssText = 'margin: 0 0 12px; font-size: 13px; color: var(--text-muted);';
+        descEl.innerHTML =
+            '<a href="https://developer.x.com" target="_blank">developer.x.com</a> でアプリを作成し、' +
+            'OAuth 2.0 を有効化。Callback URI に ' +
+            '<code>http://127.0.0.1:3001/oauth/callback</code> を登録してください。';
+
         new Setting(containerEl)
-            .setName('サーバー URL')
-            .setDesc('ローカル HTTP サーバーの URL（デフォルト: http://127.0.0.1:3001）')
+            .setName('Client ID')
+            .setDesc('X Developer Portal → Keys and tokens → Client ID')
             .addText(text => text
-                .setPlaceholder(DEFAULT_SETTINGS.serverUrl)
-                .setValue(this.plugin.settings.serverUrl)
+                .setPlaceholder('例: xxxxxxxxxxxxxxxxxxxx')
+                .setValue(this.plugin.settings.clientId)
                 .onChange(async (value) => {
-                    this.plugin.settings = { ...this.plugin.settings, serverUrl: value || DEFAULT_SETTINGS.serverUrl };
+                    this.plugin.settings = { ...this.plugin.settings, clientId: value };
                     await this.plugin.saveSettings();
                 }));
 
         new Setting(containerEl)
+            .setName('Client Secret')
+            .setDesc('Confidential Client の場合のみ入力（Public Client は空欄で OK）')
+            .addText(text => {
+                text.inputEl.type = 'password';
+                text.setPlaceholder('Client Secret（任意）')
+                    .setValue(this.plugin.settings.clientSecret)
+                    .onChange(async (value) => {
+                        this.plugin.settings = { ...this.plugin.settings, clientSecret: value };
+                        await this.plugin.saveSettings();
+                    });
+            });
+
+        // ─── X アカウント連携 ───
+        containerEl.createEl('h3', { text: 'X アカウント連携' });
+
+        const statusEl = containerEl.createDiv();
+        statusEl.style.cssText = 'padding: 4px 0 12px; font-size: 13px;';
+        statusEl.setText('● 接続状態を確認中...');
+
+        let connectBtn!: ButtonComponent;
+
+        new Setting(containerEl)
+            .setName('X アカウントを連携')
+            .setDesc('クリックするとブラウザが起動し、X のログイン画面が表示されます')
+            .addButton(button => {
+                connectBtn = button;
+                button
+                    .setButtonText('連携する')
+                    .setCta()
+                    .onClick(() => this.startOAuthFlow(connectBtn, statusEl));
+            });
+
+        // connectBtn is synchronously set at this point
+        this.checkInitialStatus(statusEl, connectBtn);
+
+        // ─── 動作設定 ───
+        containerEl.createEl('h3', { text: '動作設定' });
+
+        new Setting(containerEl)
             .setName('ヘッドレスモード')
-            .setDesc('ブラウザを非表示で実行（推奨: ON）')
+            .setDesc('記事投稿時にブラウザを非表示で実行（推奨: ON）')
             .addToggle(toggle => toggle
                 .setValue(this.plugin.settings.headlessMode)
                 .onChange(async (value) => {
@@ -368,7 +449,7 @@ class XPublisherSettingTab extends PluginSettingTab {
 
         new Setting(containerEl)
             .setName('投稿後に X.com を開く')
-            .setDesc('下書き保存後にブラウザで X Articles を開く')
+            .setDesc('投稿後にブラウザで X Articles を開く')
             .addToggle(toggle => toggle
                 .setValue(this.plugin.settings.openAfterPublish)
                 .onChange(async (value) => {
@@ -386,6 +467,20 @@ class XPublisherSettingTab extends PluginSettingTab {
                     await this.plugin.saveSettings();
                 }));
 
+        // ─── 詳細設定 ───
+        containerEl.createEl('h3', { text: '詳細設定' });
+
+        new Setting(containerEl)
+            .setName('サーバー URL')
+            .setDesc('ローカル HTTP サーバーの URL（デフォルト: http://127.0.0.1:3001）')
+            .addText(text => text
+                .setPlaceholder(DEFAULT_SETTINGS.serverUrl)
+                .setValue(this.plugin.settings.serverUrl)
+                .onChange(async (value) => {
+                    this.plugin.settings = { ...this.plugin.settings, serverUrl: value || DEFAULT_SETTINGS.serverUrl };
+                    await this.plugin.saveSettings();
+                }));
+
         new Setting(containerEl)
             .setName('サーバー接続テスト')
             .setDesc('ローカルサーバーとの接続を確認')
@@ -394,17 +489,111 @@ class XPublisherSettingTab extends PluginSettingTab {
                 .onClick(async () => {
                     button.setButtonText('確認中...');
                     button.setDisabled(true);
-                    try {
-                        const ok = await this.plugin.xClient.healthCheck();
-                        button.setButtonText(ok ? '接続成功!' : '接続失敗');
-                    } catch {
-                        button.setButtonText('接続失敗');
-                    }
+                    const ok = await this.plugin.xClient.healthCheck();
+                    button.setButtonText(ok ? '接続成功 ✅' : '接続失敗 ❌');
                     setTimeout(() => {
                         button.setButtonText('テスト');
                         button.setDisabled(false);
                     }, 2000);
                 }));
+    }
+
+    private async checkInitialStatus(statusEl: HTMLElement, btn: ButtonComponent): Promise<void> {
+        try {
+            const status = await this.plugin.xClient.getOAuthStatus();
+            this.applyStatusStyle(statusEl, status);
+            if (status.authenticated) {
+                btn.setButtonText('再連携');
+            }
+        } catch {
+            statusEl.setText('● サーバーに接続できません');
+            statusEl.style.color = 'var(--text-muted)';
+        }
+    }
+
+    private applyStatusStyle(statusEl: HTMLElement, status: OAuthStatus): void {
+        if (status.authenticated) {
+            statusEl.setText('● X アカウント連携済み');
+            statusEl.style.color = '#10b981';
+        } else if (status.status === 'error' && status.error) {
+            statusEl.setText(`● エラー: ${status.error}`);
+            statusEl.style.color = '#ef4444';
+        } else if (status.status === 'pending') {
+            statusEl.setText('● ログイン待機中...');
+            statusEl.style.color = '#f59e0b';
+        } else {
+            statusEl.setText('● 未接続');
+            statusEl.style.color = 'var(--text-muted)';
+        }
+    }
+
+    private async startOAuthFlow(button: ButtonComponent, statusEl: HTMLElement): Promise<void> {
+        const { clientId, clientSecret } = this.plugin.settings;
+
+        if (!clientId) {
+            new Notice('Client ID を入力してください');
+            return;
+        }
+
+        const isServerUp = await this.plugin.xClient.healthCheck();
+        if (!isServerUp) {
+            new Notice('サーバーが起動していません。ターミナルで npm run server を実行してください。', 8000);
+            return;
+        }
+
+        button.setButtonText('認証中...').setDisabled(true);
+        statusEl.setText('● ブラウザでログインしてください...');
+        statusEl.style.color = '#f59e0b';
+
+        try {
+            await this.plugin.xClient.startOAuth(clientId, clientSecret || undefined);
+        } catch (err: any) {
+            button.setButtonText('連携する').setDisabled(false);
+            statusEl.setText(`● エラー: ${err.message}`);
+            statusEl.style.color = '#ef4444';
+            return;
+        }
+
+        this.pollingActive = true;
+        await this.pollUntilComplete(button, statusEl);
+    }
+
+    private async pollUntilComplete(button: ButtonComponent, statusEl: HTMLElement): Promise<void> {
+        const MAX_POLLS = 150; // 5 minutes (150 × 2s)
+        let count = 0;
+
+        while (this.pollingActive && count < MAX_POLLS) {
+            await new Promise<void>(resolve => setTimeout(resolve, 2000));
+            if (!this.pollingActive) break;
+            count++;
+
+            const status = await this.plugin.xClient.getOAuthStatus();
+
+            if (status.authenticated || status.status === 'success') {
+                this.pollingActive = false;
+                button.setButtonText('再連携').setDisabled(false);
+                statusEl.setText('● X アカウント連携済み');
+                statusEl.style.color = '#10b981';
+                new Notice('X アカウントの連携が完了しました！');
+                return;
+            }
+
+            if (status.status === 'error') {
+                this.pollingActive = false;
+                button.setButtonText('連携する').setDisabled(false);
+                statusEl.setText(`● エラー: ${status.error || '不明なエラー'}`);
+                statusEl.style.color = '#ef4444';
+                return;
+            }
+        }
+
+        // Timeout
+        if (this.pollingActive) {
+            this.pollingActive = false;
+            button.setButtonText('連携する').setDisabled(false);
+            statusEl.setText('● タイムアウト（再試行してください）');
+            statusEl.style.color = '#ef4444';
+        }
     }
 }
 
@@ -426,9 +615,7 @@ export default class XPublisherPlugin extends Plugin {
             checkCallback: (checking: boolean) => {
                 const file = this.app.workspace.getActiveFile();
                 if (file && file.extension === 'md') {
-                    if (!checking) {
-                        this.publishCurrentFile(file);
-                    }
+                    if (!checking) this.publishCurrentFile(file);
                     return true;
                 }
                 return false;
@@ -441,9 +628,7 @@ export default class XPublisherPlugin extends Plugin {
             checkCallback: (checking: boolean) => {
                 const file = this.app.workspace.getActiveFile();
                 if (file && file.extension === 'md') {
-                    if (!checking) {
-                        this.publishCurrentFile(file, true);
-                    }
+                    if (!checking) this.publishCurrentFile(file, true);
                     return true;
                 }
                 return false;
@@ -495,15 +680,9 @@ export default class XPublisherPlugin extends Plugin {
     async doPublish(parsedNote: ParsedNote, file: TFile) {
         const loadingNotice = new Notice('X Article に投稿中...', 0);
 
-        // Frontmatter を publishing 状態に更新
         try {
-            await updateFrontmatter(this.app, file, {
-                x_status: 'publishing',
-                x_error: ''
-            });
-        } catch (e) {
-            // Frontmatter 更新失敗は非致命的
-        }
+            await updateFrontmatter(this.app, file, { x_status: 'publishing', x_error: '' });
+        } catch {}
 
         try {
             const validImages = parsedNote.images
@@ -520,23 +699,15 @@ export default class XPublisherPlugin extends Plugin {
             loadingNotice.hide();
 
             if (result.success) {
-                const updates: Record<string, any> = {
-                    x_status: 'published',
-                    x_error: ''
-                };
-
-                if (result.articleUrl) {
-                    updates.x_url = result.articleUrl;
-                }
+                const updates: Record<string, any> = { x_status: 'published', x_error: '' };
+                if (result.articleUrl) updates.x_url = result.articleUrl;
 
                 const cache = this.app.metadataCache.getFileCache(file);
                 if (!cache?.frontmatter?.x_publish_date) {
                     updates.x_publish_date = getTodayDate();
                 }
 
-                try {
-                    await updateFrontmatter(this.app, file, updates);
-                } catch (e) {}
+                try { await updateFrontmatter(this.app, file, updates); } catch {}
 
                 if (this.settings.showNotification) {
                     new Notice(`投稿完了: "${parsedNote.title}"`);
@@ -554,12 +725,7 @@ export default class XPublisherPlugin extends Plugin {
             loadingNotice.hide();
 
             const errorMessage = this.getShortErrorMessage(error);
-            try {
-                await updateFrontmatter(this.app, file, {
-                    x_status: 'review',
-                    x_error: errorMessage
-                });
-            } catch (e) {}
+            try { await updateFrontmatter(this.app, file, { x_status: 'review', x_error: errorMessage }); } catch {}
 
             this.handleError(error);
         }
@@ -567,12 +733,9 @@ export default class XPublisherPlugin extends Plugin {
 
     getShortErrorMessage(error: any): string {
         const message = error.message || String(error);
-
-        if (message.includes('ECONNREFUSED') || message.includes('fetch')) {
-            return 'サーバー接続失敗';
-        }
+        if (message.includes('ECONNREFUSED') || message.includes('fetch')) return 'サーバー接続失敗';
         if (message.includes('timeout')) return 'タイムアウト';
-        if (message.includes('cookies') || message.includes('login')) return '認証エラー';
+        if (message.includes('未連携') || message.includes('cookies')) return '認証エラー';
         if (message.length > 50) return message.substring(0, 47) + '...';
         return message;
     }
@@ -582,9 +745,9 @@ export default class XPublisherPlugin extends Plugin {
         let userMessage = 'X Article への投稿に失敗しました';
 
         if (message.includes('ECONNREFUSED') || message.includes('fetch')) {
-            userMessage = `サーバーに接続できません (${this.settings.serverUrl})。npm run server を実行してください。`;
-        } else if (message.includes('cookies') || message.includes('x-cookies')) {
-            userMessage = 'Cookie が見つかりません。先に npm run login を実行してください。';
+            userMessage = `サーバーに接続できません。ターミナルで npm run server を実行し、プラグイン設定を確認してください。`;
+        } else if (message.includes('未連携') || message.includes('cookies')) {
+            userMessage = 'X アカウントが連携されていません。プラグイン設定から「X アカウントを連携」を実行してください。';
         } else if (message.includes('timeout')) {
             userMessage = 'タイムアウトしました。もう一度お試しください。';
         } else {
