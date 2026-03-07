@@ -555,7 +555,7 @@ app.post('/publish', async (req, res) => {
             title,
             markdown,
             images: images || [],
-            headless: headless !== false
+            headless: headless === true  // デフォルト false（デバッグしやすいよう画面表示）
         });
         console.log(`[Server] 投稿完了: ${result.articleUrl}`);
         res.json({ success: true, articleUrl: result.articleUrl });

@@ -270,6 +270,8 @@ async function createNewArticle(page) {
     // URL が compose/articles/edit/{id} に変わるまで待つ
     const createBtnSelectors = [
         'button[aria-label="create"]',
+        'a:has-text("記事を作成")',
+        'a:has-text("Create article")',
         'button:has-text("記事を作成")',
         'button:has-text("Create article")',
         'button:has-text("New article")',
