@@ -395,6 +395,8 @@ async function focusBody(page) {
     // X Articles では「記事の作成を開始」というプレースホルダーがある
     const bodySelectors = [
         '[data-testid="article-body"]',
+        // DOM調査で確認: DraftJS エディタ本文は public-DraftStyleDefault-block
+        'div.public-DraftStyleDefault-block',
         '[contenteditable="true"][data-placeholder*="記事の作成"]',
         '[contenteditable="true"][data-placeholder*="Start writing"]',
         '[contenteditable="true"][data-placeholder*="Body"]',
@@ -787,49 +789,82 @@ async function insertImage(page, imagePath) {
     }
 
     try {
-        // 改行を入れて新しいブロックへ
         await page.keyboard.press('Enter');
-        await page.waitForTimeout(300);
+        await page.waitForTimeout(500);
 
-        // Image ボタンをクリックしてファイルチューザーを開く
         let chooser = null;
 
-        const imageBtnSelectors = [
-            '[aria-label*="Image"]',
-            '[aria-label*="Photo"]',
-            '[aria-label*="Media"]',
-            '[aria-label*="画像"]',
-            'button:has-text("Image")',
-            'button:has-text("Photo")'
+        // ─── Step 1: 挿入ドロップダウンを開くボタンを探す
+        // DOM調査: ドロップダウンは data-testid="Dropdown" / role="menu" / [role="menuitem"]
+        // トリガーボタンのaria-labelを複数候補で試す
+        const insertTriggerSelectors = [
+            '[aria-label="Insert"]',
+            '[aria-label="挿入"]',
+            '[aria-label="Add"]',
+            '[aria-label="Insert media"]',
+            '[aria-label="Media"]',
+            '[aria-label="メディア"]',
+            '[data-testid="toolBar"] button:last-child',  // ツールバー最後のボタン
+            '[data-testid="toolbar"] button:last-child',
         ];
 
-        for (const selector of imageBtnSelectors) {
-            const btn = page.locator(selector).first();
-            if (await btn.isVisible().catch(() => false)) {
-                try {
+        for (const btnSel of insertTriggerSelectors) {
+            const btn = page.locator(btnSel).first();
+            if (!await btn.isVisible().catch(() => false)) continue;
+
+            try {
+                await btn.click();
+                await page.waitForTimeout(600);
+
+                // ドロップダウンが開いたか確認
+                const mediaItem = page.locator(
+                    '[role="menuitem"]:has-text("メディア"), [role="menuitem"]:has-text("Media")'
+                ).first();
+
+                if (await mediaItem.isVisible().catch(() => false)) {
+                    console.log(`[Publisher] 挿入メニュー開いた: ${btnSel}`);
                     [chooser] = await Promise.all([
-                        page.waitForEvent('filechooser', { timeout: 5000 }),
-                        btn.click()
+                        page.waitForEvent('filechooser', { timeout: 8000 }),
+                        mediaItem.click()
                     ]);
                     break;
-                } catch {
-                    // 次のセレクターを試す
                 }
+
+                // メニューが開かなかったら閉じて次へ
+                await page.keyboard.press('Escape').catch(() => {});
+                await page.waitForTimeout(200);
+            } catch {
+                await page.keyboard.press('Escape').catch(() => {});
+            }
+        }
+
+        // ─── Step 2: 既にドロップダウンが開いている場合
+        if (!chooser) {
+            const mediaItem = page.locator(
+                '[role="menuitem"]:has-text("メディア"), [role="menuitem"]:has-text("Media")'
+            ).first();
+            if (await mediaItem.isVisible().catch(() => false)) {
+                [chooser] = await Promise.all([
+                    page.waitForEvent('filechooser', { timeout: 8000 }),
+                    mediaItem.click()
+                ]);
             }
         }
 
         if (!chooser) {
+            // デバッグ: ツールバー全ボタンのaria-labelをログ出力
+            const btns = await page.locator('[data-testid="toolBar"] button, [data-testid="toolbar"] button').all();
+            const labels = await Promise.all(btns.map(b => b.getAttribute('aria-label').catch(() => '?')));
+            console.warn('[Publisher] ⚠️  ツールバーボタン一覧:', labels.filter(Boolean).join(', '));
             console.warn('[Publisher] ⚠️  画像挿入ボタンが見つかりません');
             return false;
         }
 
         await chooser.setFiles(imagePath);
-        await page.waitForTimeout(4000);
-
-        // アップロード完了を確認（progressbar が消えるのを待つ）
+        await page.waitForTimeout(5000);
         await page.waitForSelector('[role="progressbar"]', { state: 'hidden', timeout: 30000 }).catch(() => {});
-
         await page.waitForTimeout(1000);
+
         console.log(`[Publisher] ✅ 画像挿入完了`);
         return true;
     } catch (error) {
