@@ -1,12 +1,10 @@
 #!/usr/bin/env node
 /**
- * obsidian-to-x-publisher Local HTTP Server v2.0.0
+ * obsidian-to-x-publisher Local HTTP Server v2.1.0
  *
- * Obsidian プラグインと X Articles を橋渡しするローカルサーバー
  * OAuth 2.0 PKCE 認証フローを内蔵
- *
- * 使い方:
- *   npm run server
+ * 認証はシステムブラウザ（Safari/Chrome）で行うため
+ * ボット検出の影響を受けません
  *
  * X Developer Portal に登録する Callback URI:
  *   http://127.0.0.1:3001/oauth/callback
@@ -18,6 +16,7 @@ const express = require('express');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
+const { exec } = require('child_process');
 const dotenv = require('dotenv');
 
 const ENV_PATH = path.join(__dirname, '../.env');
@@ -39,7 +38,6 @@ app.use(express.json({ limit: '50mb' }));
 const oauth = {
     status: 'idle',       // 'idle' | 'pending' | 'success' | 'error'
     error: null,
-    browserContext: null, // Playwright context (for cookie capture)
     codeVerifier: null,
     expectedState: null,
     clientId: null,
@@ -108,8 +106,24 @@ function updateEnvFile(updates) {
         } else {
             content += `\n${key}=${value}`;
         }
+        // Also update live process.env
+        process.env[key] = value;
     }
     fs.writeFileSync(ENV_PATH, content.trim() + '\n');
+}
+
+// ========================================
+// Session Cookie Helpers
+// ========================================
+
+function hasValidSession() {
+    if (!fs.existsSync(COOKIES_PATH)) return false;
+    try {
+        const state = JSON.parse(fs.readFileSync(COOKIES_PATH, 'utf-8'));
+        return !!state.cookies?.find(c => c.name === 'auth_token' && c.value);
+    } catch {
+        return false;
+    }
 }
 
 // ========================================
@@ -123,9 +137,10 @@ function renderCallbackPage(title, message, success) {
 <head><meta charset="UTF-8"><title>${title}</title>
 <style>
   body { font-family: -apple-system, sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; background: #f9fafb; }
-  .card { background: white; border-radius: 12px; padding: 48px; text-align: center; box-shadow: 0 4px 24px rgba(0,0,0,0.1); max-width: 400px; }
+  .card { background: white; border-radius: 12px; padding: 48px; text-align: center; box-shadow: 0 4px 24px rgba(0,0,0,0.1); max-width: 440px; }
   h1 { color: ${color}; font-size: 24px; margin-bottom: 16px; }
   p { color: #6b7280; line-height: 1.6; }
+  code { background: #f3f4f6; padding: 2px 6px; border-radius: 4px; font-size: 13px; }
 </style>
 </head>
 <body>
@@ -141,13 +156,14 @@ function renderCallbackPage(title, message, success) {
 app.get('/health', (req, res) => {
     res.json({
         status: 'ok',
-        version: '2.0.0',
-        authenticated: fs.existsSync(COOKIES_PATH)
+        version: '2.1.0',
+        oauthConnected: !!process.env.X_ACCESS_TOKEN,
+        sessionReady: hasValidSession()
     });
 });
 
 // ========================================
-// OAuth: Start Flow
+// OAuth: Start Flow (opens system browser)
 // ========================================
 
 app.post('/oauth/start', (req, res) => {
@@ -167,7 +183,6 @@ app.post('/oauth/start', (req, res) => {
     Object.assign(oauth, {
         status: 'pending',
         error: null,
-        browserContext: null,
         codeVerifier,
         expectedState: state,
         clientId,
@@ -183,61 +198,25 @@ app.post('/oauth/start', (req, res) => {
     authUrl.searchParams.set('code_challenge', codeChallenge);
     authUrl.searchParams.set('code_challenge_method', 'S256');
 
-    console.log('[OAuth] 認証フロー開始...');
+    const url = authUrl.toString();
+    console.log('[OAuth] 認証フロー開始 - システムブラウザを起動...');
+
+    // Open in system browser (Safari/Chrome) — avoids bot detection
+    const openCmd = process.platform === 'win32' ? `start "" "${url}"`
+                  : process.platform === 'linux'  ? `xdg-open "${url}"`
+                  : `open "${url}"`;
+
+    exec(openCmd, (err) => {
+        if (err) {
+            console.error('[OAuth] ブラウザ起動失敗:', err.message);
+            Object.assign(oauth, { status: 'error', error: 'ブラウザを開けませんでした: ' + err.message });
+        } else {
+            console.log('[OAuth] ブラウザを開きました。X.com でログインしてください...');
+        }
+    });
+
     res.json({ status: 'pending' });
-
-    // Launch Playwright browser in background
-    launchOAuthBrowser(authUrl.toString()).catch(err => {
-        if (oauth.status === 'pending') {
-            Object.assign(oauth, { status: 'error', error: err.message, browserContext: null });
-        }
-        console.error('[OAuth] ブラウザ起動失敗:', err.message);
-    });
 });
-
-async function launchOAuthBrowser(authUrl) {
-    const { chromium } = require('playwright');
-
-    const browser = await chromium.launch({
-        headless: false,
-        slowMo: 50,
-        args: ['--disable-blink-features=AutomationControlled', '--disable-infobars', '--no-sandbox'],
-        ignoreDefaultArgs: ['--enable-automation']
-    });
-
-    const context = await browser.newContext({
-        viewport: { width: 1280, height: 900 },
-        locale: 'ja-JP',
-        userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
-    });
-
-    oauth.browserContext = context;
-
-    const page = await context.newPage();
-    await page.addInitScript(() => {
-        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-        Object.defineProperty(navigator, 'languages', { get: () => ['ja', 'en-US', 'en'] });
-        Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-        // eslint-disable-next-line no-undef
-        window.chrome = { runtime: {}, loadTimes: function () { }, csi: function () { }, app: {} };
-    });
-
-    await page.goto(authUrl, { waitUntil: 'domcontentloaded' });
-
-    // Wait for redirect to callback URL (Express /oauth/callback handles the code exchange)
-    await page.waitForURL(
-        url => url.href.startsWith(REDIRECT_URI),
-        { timeout: 5 * 60 * 1000 }
-    ).catch(() => {
-        // Timeout: update status if still pending
-        if (oauth.status === 'pending') {
-            Object.assign(oauth, {
-                status: 'error',
-                error: 'タイムアウト: 5分以内に認証が完了しませんでした'
-            });
-        }
-    });
-}
 
 // ========================================
 // OAuth: Callback (redirect from X)
@@ -261,13 +240,6 @@ app.get('/oauth/callback', async (req, res) => {
     }
 
     try {
-        // Capture Playwright cookies (x.com session) before page navigates away
-        let storageState = { cookies: [], origins: [] };
-        if (oauth.browserContext) {
-            storageState = await oauth.browserContext.storageState();
-        }
-
-        // Exchange authorization code for OAuth tokens
         const tokens = await exchangeCodeForTokens(
             code,
             oauth.codeVerifier,
@@ -275,31 +247,20 @@ app.get('/oauth/callback', async (req, res) => {
             oauth.clientSecret
         );
 
-        // Persist browser cookies (Playwright storageState)
-        fs.writeFileSync(COOKIES_PATH, JSON.stringify(storageState, null, 2));
-
-        // Persist OAuth tokens to .env
+        // Persist Bearer tokens to .env
         updateEnvFile({
             X_ACCESS_TOKEN: tokens.access_token,
             X_REFRESH_TOKEN: tokens.refresh_token || ''
         });
 
-        // Also save auth_token / ct0 from cookies to .env
-        const authToken = storageState.cookies.find(c => c.name === 'auth_token')?.value;
-        const csrfToken = storageState.cookies.find(c => c.name === 'ct0')?.value;
-        if (authToken) updateEnvFile({ X_AUTH_TOKEN: authToken });
-        if (csrfToken) updateEnvFile({ X_CSRF_TOKEN: csrfToken });
-
-        // Close browser after page renders
-        const ctx = oauth.browserContext;
-        setTimeout(() => ctx?.browser()?.close().catch(() => {}), 1500);
-
-        Object.assign(oauth, { status: 'success', error: null, browserContext: null });
-        console.log('[OAuth] ✅ 認証完了');
+        Object.assign(oauth, { status: 'success', error: null });
+        console.log('[OAuth] ✅ Bearer トークン取得完了');
 
         res.send(renderCallbackPage(
-            '✅ 認証完了',
-            'このタブを閉じてください。<br>Obsidian から X Article に投稿できるようになりました。',
+            '✅ OAuth 認証完了',
+            'このタブを閉じて、Obsidian に戻ってください。<br><br>' +
+            '次のステップ: プラグイン設定の「セッション Cookie 設定」で<br>' +
+            '<code>auth_token</code> と <code>ct0</code> を入力してください。',
             true
         ));
     } catch (err) {
@@ -317,8 +278,44 @@ app.get('/oauth/status', (req, res) => {
     res.json({
         status: oauth.status,
         error: oauth.error,
-        authenticated: fs.existsSync(COOKIES_PATH)
+        oauthConnected: !!process.env.X_ACCESS_TOKEN,
+        sessionReady: hasValidSession(),
+        // backward compat
+        authenticated: hasValidSession()
     });
+});
+
+// ========================================
+// Session Cookies: Manual Entry
+// ========================================
+
+app.post('/session/cookies', (req, res) => {
+    const { authToken, csrfToken } = req.body || {};
+
+    if (!authToken) {
+        return res.status(400).json({ error: 'authToken は必須です' });
+    }
+
+    const expires = Math.floor(Date.now() / 1000) + 365 * 24 * 60 * 60;
+
+    const storageState = {
+        cookies: [
+            { name: 'auth_token', value: authToken, domain: '.twitter.com', path: '/', httpOnly: true,  secure: true, sameSite: 'None', expires },
+            { name: 'auth_token', value: authToken, domain: '.x.com',       path: '/', httpOnly: true,  secure: true, sameSite: 'None', expires },
+            ...(csrfToken ? [
+                { name: 'ct0', value: csrfToken, domain: '.twitter.com', path: '/', httpOnly: false, secure: true, sameSite: 'Lax', expires },
+                { name: 'ct0', value: csrfToken, domain: '.x.com',       path: '/', httpOnly: false, secure: true, sameSite: 'Lax', expires }
+            ] : [])
+        ],
+        origins: []
+    };
+
+    fs.writeFileSync(COOKIES_PATH, JSON.stringify(storageState, null, 2));
+    updateEnvFile({ X_AUTH_TOKEN: authToken });
+    if (csrfToken) updateEnvFile({ X_CSRF_TOKEN: csrfToken });
+
+    console.log('[Session] ✅ Cookie を保存しました');
+    res.json({ success: true });
 });
 
 // ========================================
@@ -332,24 +329,21 @@ app.post('/publish', async (req, res) => {
         return res.status(400).json({ success: false, error: 'title と markdown は必須です' });
     }
 
-    if (!fs.existsSync(COOKIES_PATH)) {
+    if (!hasValidSession()) {
         return res.status(401).json({
             success: false,
-            error: 'X アカウントが未連携です。Obsidian 設定から「X アカウントを連携」を実行してください。'
+            error: 'セッション Cookie が設定されていません。Obsidian 設定の「セッション Cookie 設定」を完了してください。'
         });
     }
 
     try {
         console.log(`[Server] 投稿開始: "${title}"`);
-        console.log(`[Server] 画像数: ${images?.length || 0}`);
-
         const result = await publishToX({
             title,
             markdown,
             images: images || [],
             headless: headless !== false
         });
-
         console.log(`[Server] 投稿完了: ${result.articleUrl}`);
         res.json({ success: true, articleUrl: result.articleUrl });
     } catch (error) {
@@ -363,13 +357,13 @@ app.post('/publish', async (req, res) => {
 // ========================================
 
 app.listen(PORT, '127.0.0.1', () => {
-    console.log(`\n[X Publisher Server] v2.0.0 起動`);
+    console.log(`\n[X Publisher Server] v2.1.0 起動`);
     console.log(`[X Publisher Server] http://127.0.0.1:${PORT}/health`);
     console.log(`[X Publisher Server] OAuth コールバック: ${REDIRECT_URI}\n`);
 
-    if (!fs.existsSync(COOKIES_PATH)) {
-        console.warn('[X Publisher Server] ⚠️  未認証 - Obsidian 設定から「X アカウントを連携」してください\n');
+    if (!hasValidSession()) {
+        console.warn('[X Publisher Server] ⚠️  Cookie 未設定 - Obsidian 設定から「セッション Cookie 設定」を完了してください\n');
     } else {
-        console.log('[X Publisher Server] ✅ 認証済み\n');
+        console.log('[X Publisher Server] ✅ セッション Cookie 設定済み\n');
     }
 });

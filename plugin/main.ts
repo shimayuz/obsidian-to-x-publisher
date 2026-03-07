@@ -44,7 +44,9 @@ interface PublishResult {
 interface OAuthStatus {
     status: 'idle' | 'pending' | 'success' | 'error';
     error: string | null;
-    authenticated: boolean;
+    authenticated: boolean;   // backward compat: sessionReady
+    oauthConnected?: boolean; // Bearer token obtained
+    sessionReady?: boolean;   // Playwright cookies set
 }
 
 // ========================================
@@ -194,6 +196,24 @@ class XPublisherClient {
             return JSON.parse(text) as OAuthStatus;
         } catch {
             return { status: 'error', error: 'サーバーが起動していません（npm run server）', authenticated: false };
+        }
+    }
+
+    async saveSessionCookies(authToken: string, csrfToken?: string): Promise<void> {
+        const body: Record<string, string> = { authToken };
+        if (csrfToken) body.csrfToken = csrfToken;
+
+        const response = await requestUrl({
+            url: `${this.serverUrl}/session/cookies`,
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+            throw: false
+        });
+
+        if (response.status !== 200) {
+            const parsed = JSON.parse(response.text);
+            throw new Error(parsed.error || `HTTP ${response.status}`);
         }
     }
 
@@ -455,8 +475,90 @@ class XPublisherSettingTab extends PluginSettingTab {
                     .onClick(() => this.startOAuthFlow(connectBtn, statusEl));
             });
 
-        // connectBtn is synchronously set at this point
-        this.checkInitialStatus(statusEl, connectBtn);
+        // ─── セッション Cookie 設定 ───
+        containerEl.createEl('h3', { text: 'セッション Cookie 設定' });
+
+        const cookieDescEl = containerEl.createEl('p', { cls: 'setting-item-description' });
+        cookieDescEl.style.cssText = 'margin: 0 0 12px; font-size: 13px; color: var(--text-muted);';
+        cookieDescEl.innerHTML =
+            'Safari / Chrome で <a href="https://x.com" target="_blank">x.com</a> にログイン後、' +
+            '開発者ツール（F12）→ Application タブ → Cookies → <code>.x.com</code> を開き、' +
+            '<code>auth_token</code> と <code>ct0</code> の値をコピーして入力してください。';
+
+        let authTokenInputEl: HTMLInputElement;
+        new Setting(containerEl)
+            .setName('auth_token')
+            .setDesc('X のセッション認証トークン（必須）')
+            .addText(text => {
+                text.inputEl.type = 'password';
+                authTokenInputEl = text.inputEl;
+                text.setPlaceholder('auth_token の値を貼り付け');
+            })
+            .addExtraButton(button => {
+                button.setIcon('eye').setTooltip('表示/非表示')
+                    .onClick(() => {
+                        const hidden = authTokenInputEl.type === 'password';
+                        authTokenInputEl.type = hidden ? 'text' : 'password';
+                        button.setIcon(hidden ? 'eye-off' : 'eye');
+                    });
+            });
+
+        let ct0InputEl: HTMLInputElement;
+        new Setting(containerEl)
+            .setName('ct0 (CSRF Token)')
+            .setDesc('CSRF トークン（推奨）')
+            .addText(text => {
+                text.inputEl.type = 'password';
+                ct0InputEl = text.inputEl;
+                text.setPlaceholder('ct0 の値を貼り付け');
+            })
+            .addExtraButton(button => {
+                button.setIcon('eye').setTooltip('表示/非表示')
+                    .onClick(() => {
+                        const hidden = ct0InputEl.type === 'password';
+                        ct0InputEl.type = hidden ? 'text' : 'password';
+                        button.setIcon(hidden ? 'eye-off' : 'eye');
+                    });
+            });
+
+        const sessionStatusEl = containerEl.createDiv();
+        sessionStatusEl.style.cssText = 'padding: 4px 0 12px; font-size: 13px;';
+        sessionStatusEl.setText('● 状態を確認中...');
+
+        new Setting(containerEl)
+            .setName('Cookie を保存')
+            .setDesc('入力した Cookie をサーバーに送信します')
+            .addButton(button => {
+                button
+                    .setButtonText('保存する')
+                    .setCta()
+                    .onClick(async () => {
+                        const authToken = authTokenInputEl.value.trim();
+                        const ct0 = ct0InputEl.value.trim();
+                        if (!authToken) {
+                            new Notice('auth_token を入力してください');
+                            return;
+                        }
+                        button.setButtonText('保存中...').setDisabled(true);
+                        try {
+                            await this.plugin.xClient.saveSessionCookies(authToken, ct0 || undefined);
+                            sessionStatusEl.setText('● Cookie 設定済み ✅（投稿可能）');
+                            sessionStatusEl.style.color = '#10b981';
+                            authTokenInputEl.value = '';
+                            ct0InputEl.value = '';
+                            new Notice('Cookie を保存しました！投稿できるようになりました。');
+                        } catch (err: any) {
+                            sessionStatusEl.setText(`● エラー: ${err.message}`);
+                            sessionStatusEl.style.color = '#ef4444';
+                            new Notice(`Cookie の保存に失敗しました: ${err.message}`);
+                        } finally {
+                            button.setButtonText('保存する').setDisabled(false);
+                        }
+                    });
+            });
+
+        // connectBtn と sessionStatusEl が揃ったのでステータス確認
+        this.checkInitialStatus(statusEl, connectBtn, sessionStatusEl);
 
         // ─── 動作設定 ───
         containerEl.createEl('h3', { text: '動作設定' });
@@ -522,32 +624,45 @@ class XPublisherSettingTab extends PluginSettingTab {
                 }));
     }
 
-    private async checkInitialStatus(statusEl: HTMLElement, btn: ButtonComponent): Promise<void> {
+    private async checkInitialStatus(statusEl: HTMLElement, btn: ButtonComponent, sessionStatusEl: HTMLElement): Promise<void> {
         try {
             const status = await this.plugin.xClient.getOAuthStatus();
             this.applyStatusStyle(statusEl, status);
-            if (status.authenticated) {
+            this.applySessionStyle(sessionStatusEl, status);
+            if (status.oauthConnected) {
                 btn.setButtonText('再連携');
             }
         } catch {
             statusEl.setText('● サーバーに接続できません');
             statusEl.style.color = 'var(--text-muted)';
+            sessionStatusEl.setText('● サーバーに接続できません');
+            sessionStatusEl.style.color = 'var(--text-muted)';
         }
     }
 
     private applyStatusStyle(statusEl: HTMLElement, status: OAuthStatus): void {
-        if (status.authenticated) {
-            statusEl.setText('● X アカウント連携済み');
+        if (status.oauthConnected) {
+            statusEl.setText('● Bearer トークン取得済み');
             statusEl.style.color = '#10b981';
         } else if (status.status === 'error' && status.error) {
             statusEl.setText(`● エラー: ${status.error}`);
             statusEl.style.color = '#ef4444';
         } else if (status.status === 'pending') {
-            statusEl.setText('● ログイン待機中...');
+            statusEl.setText('● ブラウザでログイン待機中...');
             statusEl.style.color = '#f59e0b';
         } else {
             statusEl.setText('● 未接続');
             statusEl.style.color = 'var(--text-muted)';
+        }
+    }
+
+    private applySessionStyle(sessionStatusEl: HTMLElement, status: OAuthStatus): void {
+        if (status.sessionReady) {
+            sessionStatusEl.setText('● Cookie 設定済み ✅（投稿可能）');
+            sessionStatusEl.style.color = '#10b981';
+        } else {
+            sessionStatusEl.setText('● 未設定（auth_token を入力してください）');
+            sessionStatusEl.style.color = 'var(--text-muted)';
         }
     }
 
@@ -593,12 +708,12 @@ class XPublisherSettingTab extends PluginSettingTab {
 
             const status = await this.plugin.xClient.getOAuthStatus();
 
-            if (status.authenticated || status.status === 'success') {
+            if (status.oauthConnected || status.status === 'success') {
                 this.pollingActive = false;
                 button.setButtonText('再連携').setDisabled(false);
-                statusEl.setText('● X アカウント連携済み');
+                statusEl.setText('● Bearer トークン取得済み');
                 statusEl.style.color = '#10b981';
-                new Notice('X アカウントの連携が完了しました！');
+                new Notice('OAuth 認証完了！「セッション Cookie 設定」で auth_token を入力してください。', 8000);
                 return;
             }
 
