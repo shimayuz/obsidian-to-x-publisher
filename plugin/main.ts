@@ -398,16 +398,28 @@ class XPublisherSettingTab extends PluginSettingTab {
                     await this.plugin.saveSettings();
                 }));
 
+        let secretInputEl: HTMLInputElement;
         new Setting(containerEl)
             .setName('Client Secret')
             .setDesc('Confidential Client の場合のみ入力（Public Client は空欄で OK）')
             .addText(text => {
                 text.inputEl.type = 'password';
+                secretInputEl = text.inputEl;
                 text.setPlaceholder('Client Secret（任意）')
                     .setValue(this.plugin.settings.clientSecret)
                     .onChange(async (value) => {
                         this.plugin.settings = { ...this.plugin.settings, clientSecret: value };
                         await this.plugin.saveSettings();
+                    });
+            })
+            .addExtraButton(button => {
+                button
+                    .setIcon('eye')
+                    .setTooltip('表示/非表示')
+                    .onClick(() => {
+                        const hidden = secretInputEl.type === 'password';
+                        secretInputEl.type = hidden ? 'text' : 'password';
+                        button.setIcon(hidden ? 'eye-off' : 'eye');
                     });
             });
 
