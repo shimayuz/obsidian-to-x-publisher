@@ -16,6 +16,7 @@ const { chromium } = require('playwright');
 const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 const dotenv = require('dotenv');
 
 dotenv.config({ path: path.join(__dirname, '../.env') });
@@ -932,17 +933,20 @@ async function publishToX({ title, markdown, images = [], headless = true }) {
         throw new Error('auth_token が見つかりません。「Chrome でログイン」を再実行してください。');
     }
 
-    // ★ プロファイルに頼らず、フレッシュな Chrome に x-cookies.json を直接インジェクト
-    //   プロファイル方式はロック競合や未フラッシュで不安定なため使わない
+    // ★ 使い捨て一時プロファイルで Chrome を起動してプロファイルピッカーをスキップ
+    //   クッキーはプロファイルに頼らず CDP Network.setCookie で直接注入する
     const CDP_PORT = 9223;
+    const tempProfileDir = path.join(os.tmpdir(), `x-pub-${Date.now()}`);
     let chromeProc = null;
     let browser = null;
     try {
         const chromeArgs = [
             `--remote-debugging-port=${CDP_PORT}`,
+            `--user-data-dir=${tempProfileDir}`,  // プロファイルピッカーを回避
             '--no-first-run',
             '--no-default-browser-check',
             '--disable-sync',
+            '--disable-extensions',
         ];
         if (headless) {
             chromeArgs.push('--headless=new');
@@ -989,6 +993,8 @@ async function publishToX({ title, markdown, images = [], headless = true }) {
     } finally {
         if (browser) { try { await browser.close(); } catch {} }
         if (chromeProc) { try { chromeProc.kill('SIGTERM'); } catch {} }
+        // 一時プロファイルを削除
+        try { fs.rmSync(tempProfileDir, { recursive: true, force: true }); } catch {}
     }
 }
 
