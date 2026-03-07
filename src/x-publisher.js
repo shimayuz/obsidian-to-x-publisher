@@ -374,6 +374,9 @@ async function setTitle(page, title) {
         await titleInput.click();
         await page.waitForTimeout(200);
         await titleInput.fill(title);
+        // Tab でフォーカスを本文エリア（DraftJS）に移す
+        await page.keyboard.press('Tab');
+        await page.waitForTimeout(300);
     } else {
         // フォールバック: 最初の contenteditable をタイトルとして使用
         const firstEditable = page.locator('[contenteditable="true"]').first();
@@ -395,11 +398,10 @@ async function focusBody(page) {
     // X Articles では「記事の作成を開始」というプレースホルダーがある
     const bodySelectors = [
         '[data-testid="article-body"]',
-        // DOM調査で確認: DraftJS エディタ本文は public-DraftStyleDefault-block
+        // DraftJS エディタの contenteditable root（タイトルは textarea なのでこれは本文のみ）
+        'div.public-DraftEditor-content',
         'div.public-DraftStyleDefault-block',
-        '[contenteditable="true"][data-placeholder*="記事の作成"]',
-        '[contenteditable="true"][data-placeholder*="Start writing"]',
-        '[contenteditable="true"][data-placeholder*="Body"]',
+        '[contenteditable="true"]',
         '[role="textbox"][aria-label*="Body"]',
         '[role="textbox"][aria-label*="本文"]'
     ];
@@ -409,6 +411,7 @@ async function focusBody(page) {
         if (await el.isVisible().catch(() => false)) {
             await el.click();
             await page.waitForTimeout(300);
+            console.log(`[Publisher] 本文フォーカス: ${selector}`);
             return;
         }
     }
@@ -795,7 +798,26 @@ async function insertImage(page, imagePath) {
         // ─── Step 1: ツールバー全ボタンを試して「メディア」メニューを開く
         let mediaMenuOpened = false;
 
-        const allToolbarBtns = await page.locator(
+        // スクリーンショット確認済み: ツールバーに「挿入▼」ボタンが存在する
+        // まず「挿入」テキストのボタンを直接試す
+        for (const quickSel of ['button:has-text("挿入")', 'button[aria-label="Insert"]', 'button[aria-label="挿入"]']) {
+            const quickBtn = page.locator(quickSel).first();
+            if (await quickBtn.isVisible().catch(() => false)) {
+                await quickBtn.click();
+                await page.waitForTimeout(400);
+                const mediaItem = page.locator('[role="menuitem"]:has-text("メディア"), [role="menuitem"]:has-text("Media")').first();
+                if (await mediaItem.isVisible().catch(() => false)) {
+                    console.log(`[Publisher] 挿入メニュー発見 (${quickSel})`);
+                    await mediaItem.click();
+                    mediaMenuOpened = true;
+                    await page.waitForTimeout(1500);
+                    break;
+                }
+                await page.keyboard.press('Escape').catch(() => {});
+            }
+        }
+
+        const allToolbarBtns = mediaMenuOpened ? [] : await page.locator(
             '[data-testid="toolBar"] button, [data-testid="toolbar"] button, [role="toolbar"] button'
         ).all();
 
