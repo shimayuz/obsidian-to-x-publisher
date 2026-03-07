@@ -529,10 +529,12 @@ class XPublisherSettingTab extends PluginSettingTab {
         const cookieDescEl = containerEl.createEl('p', { cls: 'setting-item-description' });
         cookieDescEl.style.cssText = 'margin: 0 0 12px; font-size: 13px; color: var(--text-muted);';
         cookieDescEl.innerHTML =
-            '<b>設定方法：</b> Safari / Chrome で <a href="https://x.com" target="_blank">x.com</a> にログインした状態で、<br>' +
+            '⚠️ <b>OAuth 認証後に設定が必要です（一度だけ）</b><br><br>' +
+            '<b>手順：</b> <a href="https://x.com" target="_blank">x.com</a> にログインしているブラウザで<br>' +
             '開発者ツール（Mac: <code>Cmd+Option+I</code> / Win: <code>F12</code>）を開き、<br>' +
-            '<b>Application</b> タブ → <b>Cookies</b> → <b>.x.com</b> を選択し、<br>' +
-            '<code>auth_token</code> と <code>ct0</code> の Value をコピーして貼り付けてください。';
+            '<b>Application</b> タブ → <b>Cookies</b> → <b>https://x.com</b> を選択し、<br>' +
+            '<code>auth_token</code> と <code>ct0</code> の Value をコピーして貼り付けてください。<br>' +
+            '<small>※ auth_token は httpOnly なので JavaScript では取得できません（DevTools 必須）</small>';
 
         let authTokenInputEl: HTMLInputElement;
         new Setting(containerEl)
@@ -765,7 +767,11 @@ class XPublisherSettingTab extends PluginSettingTab {
                 if (status.sessionReady) {
                     new Notice('認証完了！投稿できるようになりました。', 5000);
                 } else {
-                    new Notice('OAuth 完了。Cookie が自動取得できなかった場合は「セッション Cookie 設定」で手動入力してください。', 10000);
+                    new Notice(
+                        'OAuth 完了！\n次に「セッション Cookie 設定」へ：\n' +
+                        'ブラウザで x.com を開いて DevTools（F12）→ Application → Cookies → auth_token と ct0 をコピーして貼り付けてください。',
+                        15000
+                    );
                 }
                 return;
             }

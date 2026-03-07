@@ -391,7 +391,7 @@ var XPublisherSettingTab = class extends import_obsidian.PluginSettingTab {
     containerEl.createEl("h3", { text: "\u30BB\u30C3\u30B7\u30E7\u30F3 Cookie \u8A2D\u5B9A" });
     const cookieDescEl = containerEl.createEl("p", { cls: "setting-item-description" });
     cookieDescEl.style.cssText = "margin: 0 0 12px; font-size: 13px; color: var(--text-muted);";
-    cookieDescEl.innerHTML = '<b>\u8A2D\u5B9A\u65B9\u6CD5\uFF1A</b> Safari / Chrome \u3067 <a href="https://x.com" target="_blank">x.com</a> \u306B\u30ED\u30B0\u30A4\u30F3\u3057\u305F\u72B6\u614B\u3067\u3001<br>\u958B\u767A\u8005\u30C4\u30FC\u30EB\uFF08Mac: <code>Cmd+Option+I</code> / Win: <code>F12</code>\uFF09\u3092\u958B\u304D\u3001<br><b>Application</b> \u30BF\u30D6 \u2192 <b>Cookies</b> \u2192 <b>.x.com</b> \u3092\u9078\u629E\u3057\u3001<br><code>auth_token</code> \u3068 <code>ct0</code> \u306E Value \u3092\u30B3\u30D4\u30FC\u3057\u3066\u8CBC\u308A\u4ED8\u3051\u3066\u304F\u3060\u3055\u3044\u3002';
+    cookieDescEl.innerHTML = '\u26A0\uFE0F <b>OAuth \u8A8D\u8A3C\u5F8C\u306B\u8A2D\u5B9A\u304C\u5FC5\u8981\u3067\u3059\uFF08\u4E00\u5EA6\u3060\u3051\uFF09</b><br><br><b>\u624B\u9806\uFF1A</b> <a href="https://x.com" target="_blank">x.com</a> \u306B\u30ED\u30B0\u30A4\u30F3\u3057\u3066\u3044\u308B\u30D6\u30E9\u30A6\u30B6\u3067<br>\u958B\u767A\u8005\u30C4\u30FC\u30EB\uFF08Mac: <code>Cmd+Option+I</code> / Win: <code>F12</code>\uFF09\u3092\u958B\u304D\u3001<br><b>Application</b> \u30BF\u30D6 \u2192 <b>Cookies</b> \u2192 <b>https://x.com</b> \u3092\u9078\u629E\u3057\u3001<br><code>auth_token</code> \u3068 <code>ct0</code> \u306E Value \u3092\u30B3\u30D4\u30FC\u3057\u3066\u8CBC\u308A\u4ED8\u3051\u3066\u304F\u3060\u3055\u3044\u3002<br><small>\u203B auth_token \u306F httpOnly \u306A\u306E\u3067 JavaScript \u3067\u306F\u53D6\u5F97\u3067\u304D\u307E\u305B\u3093\uFF08DevTools \u5FC5\u9808\uFF09</small>';
     let authTokenInputEl;
     new import_obsidian.Setting(containerEl).setName("auth_token").setDesc("X \u306E\u30BB\u30C3\u30B7\u30E7\u30F3\u8A8D\u8A3C\u30C8\u30FC\u30AF\u30F3\uFF08\u5FC5\u9808\uFF09").addText((text) => {
       text.inputEl.type = "password";
@@ -555,7 +555,7 @@ var XPublisherSettingTab = class extends import_obsidian.PluginSettingTab {
         if (status.sessionReady) {
           new import_obsidian.Notice("\u8A8D\u8A3C\u5B8C\u4E86\uFF01\u6295\u7A3F\u3067\u304D\u308B\u3088\u3046\u306B\u306A\u308A\u307E\u3057\u305F\u3002", 5e3);
         } else {
-          new import_obsidian.Notice("OAuth \u5B8C\u4E86\u3002Cookie \u304C\u81EA\u52D5\u53D6\u5F97\u3067\u304D\u306A\u304B\u3063\u305F\u5834\u5408\u306F\u300C\u30BB\u30C3\u30B7\u30E7\u30F3 Cookie \u8A2D\u5B9A\u300D\u3067\u624B\u52D5\u5165\u529B\u3057\u3066\u304F\u3060\u3055\u3044\u3002", 1e4);
+          new import_obsidian.Notice("OAuth \u5B8C\u4E86\uFF01\n\u6B21\u306B\u300C\u30BB\u30C3\u30B7\u30E7\u30F3 Cookie \u8A2D\u5B9A\u300D\u3078\uFF1A\n\u30D6\u30E9\u30A6\u30B6\u3067 x.com \u3092\u958B\u3044\u3066 DevTools\uFF08F12\uFF09\u2192 Application \u2192 Cookies \u2192 auth_token \u3068 ct0 \u3092\u30B3\u30D4\u30FC\u3057\u3066\u8CBC\u308A\u4ED8\u3051\u3066\u304F\u3060\u3055\u3044\u3002", 15e3);
         }
         return;
       }
