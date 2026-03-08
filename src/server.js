@@ -33,7 +33,7 @@ const REDIRECT_URI = `http://127.0.0.1:${PORT}/oauth/callback`;
 
 dotenv.config({ path: ENV_PATH });
 
-const { publishToX } = require('./x-publisher');
+const { publishToXAPI } = require('./x-api-publisher');
 
 const app = express();
 app.use(express.json({ limit: '50mb' }));
@@ -551,11 +551,10 @@ app.post('/publish', async (req, res) => {
 
     try {
         console.log(`[Server] 投稿開始: "${title}"`);
-        const result = await publishToX({
+        const result = await publishToXAPI({
             title,
             markdown,
             images: images || [],
-            headless: headless === true  // デフォルト false（デバッグしやすいよう画面表示）
         });
         console.log(`[Server] 投稿完了: ${result.articleUrl}`);
         res.json({ success: true, articleUrl: result.articleUrl });

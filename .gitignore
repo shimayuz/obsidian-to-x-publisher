@@ -26,3 +26,6 @@ Thumbs.db
 
 # テスト・デバッグ用スクリーンショット
 /tmp/
+
+# API キャプチャログ（調査用・コミット不要）
+api-capture-*.json
