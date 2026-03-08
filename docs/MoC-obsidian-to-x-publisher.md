@@ -14,10 +14,11 @@ created: 2026-03-08
 
 | ドキュメント | 内容 | タグ |
 |------------|------|------|
+| [[brat-setup]] | BRAT 経由の Obsidian プラグインインストール手順 | `#brat` `#setup` |
+| [[setup-and-usage]] | ローカルサーバー起動・ログイン・投稿手順・トラブルシューティング | `#setup` |
 | [[api-reference]] | X Articles GraphQL API 仕様・認証・レスポンス構造 | `#x-articles-api` |
 | [[image-upload-process]] | 画像アップロードフロー・5MB 圧縮・STATUS ポーリング | `#image-upload` |
 | [[markdown-draftjs-mapping]] | Markdown → DraftJS content_state 変換マッピング | `#markdown` `#draftjs` |
-| [[setup-and-usage]] | セットアップ・ログイン・サーバー起動・投稿手順 | `#setup` |
 
 ## プロジェクト概要
 

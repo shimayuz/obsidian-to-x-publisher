@@ -18,13 +18,27 @@ Obsidian コマンド
   → Frontmatter に x_url / x_status: published を書き戻し
 ```
 
-## セットアップ
+## インストール
+
+### Obsidian プラグイン（BRAT 経由）
+
+[BRAT](https://github.com/TfTHacker/obsidian42-brat) を使って Obsidian に直接インストールできます。
+
+1. BRAT をインストール・有効化
+2. コマンドパレット →「BRAT: Add a beta plugin」
+3. URL を入力: `https://github.com/shimayuz/obsidian-to-x-publisher`
+
+詳細は [docs/brat-setup.md](docs/brat-setup.md) を参照。
+
+### ローカルサーバー
 
 ```bash
+git clone https://github.com/shimayuz/obsidian-to-x-publisher.git
+cd obsidian-to-x-publisher
 npm install
 npx playwright install chromium
 
-# X にログインして Cookie を保存
+# X にログインして Cookie を保存（初回のみ）
 npm run login
 
 # サーバー起動（port 3001）
