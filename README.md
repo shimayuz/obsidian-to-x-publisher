@@ -1,36 +1,43 @@
 # obsidian-to-x-publisher
 
-ObsidianのMarkdownノートをX (Twitter) Articlesへ自動投稿するツール。
+> 日本語版は[README-JP.md](README-JP.md)をご覧ください。
 
-- Playwright DOM操作なし → X の内部GraphQL APIを直接呼び出し
-- 画像アップロード・5MB超え自動圧縮・インラインスタイル対応
-- Obsidianプラグイン + ローカルサーバー構成
+Automatically publish Obsidian Markdown notes to X (Twitter) Articles.
 
-## 動作フロー
+- No DOM manipulation — calls X's internal GraphQL API directly
+- Image upload with automatic compression for files over 5 MB
+- Inline styles: Bold, Italic, Strikethrough
+- Obsidian plugin + local server architecture
+
+## How It Works
 
 ```text
-Obsidian コマンド
+Obsidian command
   → POST http://127.0.0.1:3001/publish
-    → ArticleEntityDraftCreate  (記事作成・ID取得)
-    → ArticleEntityUpdateTitle  (タイトル設定)
-    → upload2.json INIT/APPEND/FINALIZE/STATUS  (画像アップロード)
-    → ArticleEntityUpdateContent  (本文 DraftJS content_state 送信)
-  → Frontmatter に x_url / x_status: published を書き戻し
+    → ArticleEntityDraftCreate  (create article, get ID)
+    → ArticleEntityUpdateTitle  (set title)
+    → upload2.json INIT/APPEND/FINALIZE/STATUS  (upload images)
+    → ArticleEntityUpdateContent  (send DraftJS content_state)
+  → Write x_url / x_status: published back to Frontmatter
 ```
 
-## インストール
+## Installation
 
-### Obsidian プラグイン（BRAT 経由）
+### Obsidian Plugin via BRAT
 
-[BRAT](https://github.com/TfTHacker/obsidian42-brat) を使って Obsidian に直接インストールできます。
+Install the plugin directly from GitHub using [BRAT](https://github.com/TfTHacker/obsidian42-brat).
 
-1. BRAT をインストール・有効化
-2. コマンドパレット →「BRAT: Add a beta plugin」
-3. URL を入力: `https://github.com/shimayuz/obsidian-to-x-publisher`
+1. Install and enable BRAT in Obsidian
+2. Open the command palette → "BRAT: Add a beta plugin"
+3. Enter the repository URL:
 
-詳細は [docs/brat-setup.md](docs/brat-setup.md) を参照。
+   ```text
+   https://github.com/shimayuz/obsidian-to-x-publisher
+   ```
 
-### ローカルサーバー
+For the full walkthrough, see [docs/brat-setup.md](docs/brat-setup.md).
+
+### Local Server
 
 ```bash
 git clone https://github.com/shimayuz/obsidian-to-x-publisher.git
@@ -38,74 +45,76 @@ cd obsidian-to-x-publisher
 npm install
 npx playwright install chromium
 
-# X にログインして Cookie を保存（初回のみ）
+# Log in to X and save cookies (first time only)
 npm run login
 
-# サーバー起動（port 3001）
+# Start the server (port 3001)
 npm run server
 ```
 
-詳細は [docs/setup-and-usage.md](docs/setup-and-usage.md) を参照。
+For details, see [docs/setup-and-usage.md](docs/setup-and-usage.md).
 
-## 対応Markdown要素
+## Supported Markdown Elements
 
 | Markdown | X Articles |
 | -------- | ---------- |
-| `## 見出し` | 大見出し |
-| `### 見出し` | 小見出し |
-| `**太字**` | Bold |
-| `*斜体*` | Italic |
-| `~~打ち消し~~` | Strikethrough |
-| `- リスト` | 箇条書き |
-| `1. リスト` | 番号付きリスト |
-| `> 引用` | 引用 |
-| ` ```code``` ` | コードブロック |
-| `---` | 区切り線 |
-| `![[image.png]]` | 画像（自動アップロード） |
+| `## Heading` | Large heading |
+| `### Heading` | Small heading |
+| `**bold**` | Bold |
+| `*italic*` | Italic |
+| `~~strike~~` | Strikethrough |
+| `- item` | Bullet list |
+| `1. item` | Numbered list |
+| `> quote` | Blockquote |
+| `` ```code``` `` | Code block |
+| `---` | Divider |
+| `![[image.png]]` | Image (auto-uploaded) |
 
-インラインコード（`` `code` ``）はX Articles API非対応のためプレーンテキストに変換。
+Inline code (`` `code` ``) is not supported by the X Articles API and falls back to plain text.
 
-## 画像アップロード
+## Image Upload
 
-- エンドポイント: `upload2.json`（v2、ブラウザと同じ）
-- 5MB超えの場合: macOS組み込みの`sips`で自動圧縮（JPEG変換・最大2048px）
-- 外部ライブラリ不要
+- Endpoint: `upload2.json` (v2, same as the browser)
+- Files over 5 MB are automatically compressed using macOS's built-in `sips` (JPEG, max 2048 px)
+- No external dependencies required
 
-## ファイル構成
+## Project Structure
 
 ```text
 src/
-  x-api-publisher.js   # GraphQL API + 画像アップロード + Markdown変換
-  server.js            # Express サーバー (port 3001)
+  x-api-publisher.js   # GraphQL API + image upload + Markdown conversion
+  server.js            # Express server (port 3001)
 scripts/
-  login.js             # 初回ログイン・Cookie保存
-  capture-api.js       # ブラウザAPIキャプチャ（調査用）
-plugin/                # Obsidian プラグイン本体
-docs/                  # 詳細ドキュメント
+  login.js             # First-time login & cookie storage
+  capture-api.js       # Browser API capture (for debugging)
+plugin/                # Obsidian plugin source
+docs/                  # Documentation
   MoC-obsidian-to-x-publisher.md
+  brat-setup.md
+  setup-and-usage.md
   api-reference.md
   image-upload-process.md
   markdown-draftjs-mapping.md
-  setup-and-usage.md
 ```
 
-## npm scripts
+## npm Scripts
 
-| コマンド | 内容 |
-| ------- | ---- |
-| `npm run login` | 初回ログイン・Cookie保存 |
-| `npm run server` | サーバー起動 (port 3001) |
-| `npm run capture-api` | ブラウザAPIキャプチャ（調査用） |
+| Command | Description |
+| ------- | ----------- |
+| `npm run login` | First-time login & cookie storage |
+| `npm run server` | Start the server (port 3001) |
+| `npm run capture-api` | Capture browser API traffic (for debugging) |
 
-## ドキュメント
+## Documentation
 
-- [API リファレンス](docs/api-reference.md) — X Articles GraphQL API 仕様
-- [画像アップロードプロセス](docs/image-upload-process.md) — INIT/APPEND/FINALIZE/STATUS フロー・sips 圧縮
-- [Markdown→DraftJS マッピング](docs/markdown-draftjs-mapping.md) — 変換仕様一覧
-- [セットアップ・使い方](docs/setup-and-usage.md) — インストール・トラブルシューティング
+- [BRAT Setup](docs/brat-setup.md) — Install the Obsidian plugin via BRAT
+- [Setup & Usage](docs/setup-and-usage.md) — Installation, server startup, troubleshooting
+- [API Reference](docs/api-reference.md) — X Articles GraphQL API specification
+- [Image Upload Process](docs/image-upload-process.md) — INIT/APPEND/FINALIZE/STATUS flow, sips compression
+- [Markdown → DraftJS Mapping](docs/markdown-draftjs-mapping.md) — Conversion reference
 
-## 注意事項
+## Notes
 
-- `x-cookies.json` はGitにコミットしない（`.gitignore`済み）
-- macOS専用（sips画像圧縮のため）
-- X Articles APIの仕様変更により動作しなくなる可能性あり
+- `x-cookies.json` is never committed (already in `.gitignore`)
+- macOS only (requires `sips` for image compression)
+- May break if X changes its internal API
