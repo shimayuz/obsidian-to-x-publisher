@@ -4,7 +4,8 @@
  *
  * X (Twitter) Articlesエディタへ Markdown を自動転記
  * - Cookie 保存方式で認証
- * - リッチテキストエディタへ直接操作
+ * - Markdown → HTML 変換 → DraftJS エディタへ Clipboard paste
+ * - 画像は挿入位置ごとに個別アップロード
  *
  * 使い方 (単体テスト):
  *   node src/x-publisher.js --debug
@@ -75,7 +76,6 @@ function parseMarkdownElements(markdown) {
     while (i < lines.length) {
         const line = lines[i];
 
-        // 空行は段落区切り
         if (line.trim() === '') {
             if (paragraphBuffer.length > 0) {
                 elements.push({ type: 'paragraph', content: paragraphBuffer.join('\n') });
@@ -98,7 +98,7 @@ function parseMarkdownElements(markdown) {
                 i++;
             }
             elements.push({ type: 'code', content: codeLines.join('\n') });
-            i++; // 終了 ``` をスキップ
+            i++;
             continue;
         }
 
@@ -135,7 +135,7 @@ function parseMarkdownElements(markdown) {
             continue;
         }
 
-        // 引用ブロック（連続する > 行をグループ化）
+        // 引用ブロック
         if (line.startsWith('>')) {
             if (paragraphBuffer.length > 0) {
                 elements.push({ type: 'paragraph', content: paragraphBuffer.join('\n') });
@@ -150,7 +150,7 @@ function parseMarkdownElements(markdown) {
             continue;
         }
 
-        // 箇条書きリスト（連続する - / * 行をグループ化）
+        // 箇条書きリスト
         if (line.match(/^[-*] /)) {
             if (paragraphBuffer.length > 0) {
                 elements.push({ type: 'paragraph', content: paragraphBuffer.join('\n') });
@@ -165,7 +165,7 @@ function parseMarkdownElements(markdown) {
             continue;
         }
 
-        // 番号付きリスト（連続する 1. 行をグループ化）
+        // 番号付きリスト
         if (line.match(/^\d+\. /)) {
             if (paragraphBuffer.length > 0) {
                 elements.push({ type: 'paragraph', content: paragraphBuffer.join('\n') });
@@ -204,7 +204,7 @@ function parseMarkdownElements(markdown) {
             continue;
         }
 
-        // Wikiリンクを通常テキストに変換: [[page]] → page
+        // Wikiリンクを通常テキストに変換
         const processedLine = line
             .replace(/\[\[([^\]|]+)(?:\|[^\]]+)?\]\]/g, (_, linkText) => linkText.trim());
 
@@ -212,7 +212,6 @@ function parseMarkdownElements(markdown) {
         i++;
     }
 
-    // 最後のバッファをフラッシュ
     if (paragraphBuffer.length > 0) {
         elements.push({ type: 'paragraph', content: paragraphBuffer.join('\n') });
     }
@@ -222,24 +221,104 @@ function parseMarkdownElements(markdown) {
 
 /**
  * Frontmatter からタイトルを抽出
- * @param {string} markdown
- * @param {string} fileName
- * @returns {string}
  */
 function extractTitle(markdown, fileName) {
-    // Frontmatter の title フィールド
     const fmMatch = markdown.match(/^---\s*\n([\s\S]*?)\n---/);
     if (fmMatch) {
         const titleMatch = fmMatch[1].match(/^title:\s*["']?(.+?)["']?\s*$/m);
         if (titleMatch) return titleMatch[1].trim();
     }
-
-    // H1 見出し
     const h1Match = markdown.match(/^#\s+(.+)$/m);
     if (h1Match) return h1Match[1].trim();
-
-    // ファイル名
     return fileName || '無題';
+}
+
+// ========================================
+// HTML Conversion (Markdown → HTML for DraftJS paste)
+// ========================================
+
+/** HTML 特殊文字をエスケープ */
+function escapeHTML(text) {
+    return String(text)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+}
+
+/**
+ * インライン Markdown (**bold**, *italic*, `code`) を HTML に変換
+ * テキスト内の HTML 特殊文字も適切にエスケープ
+ */
+function processInlineHTML(text) {
+    const parts = [];
+    const regex = /\*\*(.+?)\*\*|\*([^*]+)\*|`([^`]+)`/gs;
+    let lastIndex = 0;
+    let match;
+
+    while ((match = regex.exec(text)) !== null) {
+        if (match.index > lastIndex) {
+            parts.push(escapeHTML(text.slice(lastIndex, match.index)));
+        }
+        if (match[1] !== undefined) {
+            parts.push(`<strong>${escapeHTML(match[1])}</strong>`);
+        } else if (match[2] !== undefined) {
+            parts.push(`<em>${escapeHTML(match[2])}</em>`);
+        } else if (match[3] !== undefined) {
+            parts.push(`<code>${escapeHTML(match[3])}</code>`);
+        }
+        lastIndex = match.index + match[0].length;
+    }
+
+    if (lastIndex < text.length) {
+        parts.push(escapeHTML(text.slice(lastIndex)));
+    }
+
+    return parts.join('');
+}
+
+/**
+ * 解析済み要素配列（画像を除く）を HTML 文字列に変換
+ * DraftJS の paste ハンドラが解釈できる形式で出力する
+ * - <h2> → 大見出し（header-two）
+ * - <h3> → 小見出し（header-three）
+ * - <p>  → 本文（unstyled）
+ * - <ul>/<ol>/<li> → リスト
+ * - <blockquote> → 引用
+ * - <pre><code> → コードブロック
+ */
+function elementsToHTML(elements) {
+    const parts = [];
+    for (const el of elements) {
+        switch (el.type) {
+            case 'heading':
+                parts.push(`<h${el.level}>${processInlineHTML(el.content)}</h${el.level}>`);
+                break;
+            case 'paragraph':
+                parts.push(`<p>${processInlineHTML(el.content)}</p>`);
+                break;
+            case 'bulletList':
+                parts.push(
+                    `<ul>${el.items.map(item => `<li>${processInlineHTML(item)}</li>`).join('')}</ul>`
+                );
+                break;
+            case 'numberedList':
+                parts.push(
+                    `<ol>${el.items.map(item => `<li>${processInlineHTML(item)}</li>`).join('')}</ol>`
+                );
+                break;
+            case 'quote':
+                parts.push(`<blockquote><p>${processInlineHTML(el.content)}</p></blockquote>`);
+                break;
+            case 'code':
+                parts.push(`<pre><code>${escapeHTML(el.content)}</code></pre>`);
+                break;
+            case 'divider':
+                parts.push('<hr>');
+                break;
+        }
+    }
+    return parts.join('');
 }
 
 // ========================================
@@ -248,33 +327,26 @@ function extractTitle(markdown, fileName) {
 
 /**
  * X Articles の新規記事ページへ移動
- * @param {import('playwright').Page} page
  */
 async function createNewArticle(page) {
     console.log('[Publisher] X Articles 記事作成ページへ移動...');
 
-    // 正しい URL: https://x.com/compose/articles
-    // エディタは https://x.com/compose/articles/edit/{articleId} に移動する
     await page.goto('https://x.com/compose/articles', { waitUntil: 'domcontentloaded', timeout: 30000 });
     await page.waitForTimeout(2000);
     await page.waitForLoadState('networkidle').catch(() => {});
 
-    // ログインリダイレクトを検出
     const afterListUrl = page.url();
     console.log(`[Publisher] 現在のURL: ${afterListUrl}`);
     if (afterListUrl.includes('/login') || afterListUrl.includes('/i/flow/login') || afterListUrl.includes('/flow/login')) {
         throw new Error('セッションが期限切れです。Obsidian 設定からログアウト後に再度「連携する」を実行してください。');
     }
 
-    // 「記事を作成」ボタンをクリックして新規記事を開く
-    // URL が compose/articles/edit/{id} に変わるまで待つ
     const createBtnSelectors = [
         'button[aria-label="create"]',
         'a:has-text("記事を作成")',
         'a:has-text("Create article")',
         'button:has-text("記事を作成")',
         'button:has-text("Create article")',
-        'button:has-text("New article")',
         '[data-testid="create-article"]'
     ];
 
@@ -296,7 +368,6 @@ async function createNewArticle(page) {
         console.warn('[Publisher] 「記事を作成」ボタンが見つかりません。エディタを直接待ちます...');
     }
 
-    // エディタページ（compose/articles/edit/{id}）への移動を待つ
     await page.waitForTimeout(2000);
     await page.waitForLoadState('networkidle').catch(() => {});
 
@@ -306,8 +377,6 @@ async function createNewArticle(page) {
         throw new Error('セッションが期限切れです。Obsidian 設定からログアウト後に再度「連携する」を実行してください。');
     }
 
-    // エディタ（contenteditable）が現れるまで待つ
-    // タイトル欄と本文欄の両方が contenteditable
     const editorSelectors = [
         '[contenteditable="true"]',
         'div.public-DraftEditor-content',
@@ -332,8 +401,7 @@ async function createNewArticle(page) {
         throw new Error(
             `エディタが表示されませんでした。\n` +
             `URL: ${page.url()}\n` +
-            `スクリーンショット: ${screenshotPath}\n` +
-            `Cookie が期限切れの可能性があります。ログアウト後に再度「連携する」を実行してください。`
+            `スクリーンショット: ${screenshotPath}`
         );
     }
 
@@ -343,13 +411,10 @@ async function createNewArticle(page) {
 
 /**
  * 記事タイトルを入力
- * @param {import('playwright').Page} page
- * @param {string} title
  */
 async function setTitle(page, title) {
     console.log(`[Publisher] タイトル入力: "${title}"`);
 
-    // タイトル欄: placeholder "タイトルを追加" または "Add title" など
     const titleSelectors = [
         '[data-testid="article-title"]',
         '[contenteditable="true"][data-placeholder*="タイトル"]',
@@ -374,15 +439,12 @@ async function setTitle(page, title) {
         await titleInput.click();
         await page.waitForTimeout(200);
         await titleInput.fill(title);
-        // Tab でフォーカスを本文エリア（DraftJS）に移す
         await page.keyboard.press('Tab');
         await page.waitForTimeout(300);
     } else {
-        // フォールバック: 最初の contenteditable をタイトルとして使用
         const firstEditable = page.locator('[contenteditable="true"]').first();
         await firstEditable.click();
         await page.waitForTimeout(200);
-        // fill ではなく type を使う（DraftEditor は fill が機能しないことがある）
         await page.keyboard.type(title);
     }
 
@@ -391,19 +453,13 @@ async function setTitle(page, title) {
 
 /**
  * 本文エリアにフォーカスを移動
- * @param {import('playwright').Page} page
  */
 async function focusBody(page) {
-    // 本文エリア: タイトル欄の次の contenteditable
-    // X Articles では「記事の作成を開始」というプレースホルダーがある
     const bodySelectors = [
-        '[data-testid="article-body"]',
-        // DraftJS エディタの contenteditable root（タイトルは textarea なのでこれは本文のみ）
         'div.public-DraftEditor-content',
+        '[data-testid="article-body"]',
         'div.public-DraftStyleDefault-block',
         '[contenteditable="true"]',
-        '[role="textbox"][aria-label*="Body"]',
-        '[role="textbox"][aria-label*="本文"]'
     ];
 
     for (const selector of bodySelectors) {
@@ -416,7 +472,6 @@ async function focusBody(page) {
         }
     }
 
-    // フォールバック: 2番目の contenteditable（タイトルの次が本文）
     const editables = page.locator('[contenteditable="true"]');
     const count = await editables.count();
     if (count >= 2) {
@@ -424,359 +479,51 @@ async function focusBody(page) {
     } else {
         await editables.first().click();
     }
-
     await page.waitForTimeout(300);
 }
 
 /**
- * ツールバーボタンをクリック（テキスト or aria-label で検索）
- * @param {import('playwright').Page} page
- * @param {string} labelOrText
- * @returns {Promise<boolean>}
+ * HTML を DraftJS エディタに貼り付ける
+ *
+ * DraftJS は paste イベントを監視してHTML→DraftJSブロックに変換する。
+ * DataTransfer + ClipboardEvent を dispatch することで
+ * ツールバー操作なしに正確なスタイルを適用できる。
  */
-async function clickToolbarButton(page, labelOrText) {
-    // X Articles のツールバーはページ上部に固定されている
-    const selectors = [
-        `[data-testid="toolBar"] button[aria-label*="${labelOrText}"]`,
-        `[data-testid="toolbar"] button[aria-label*="${labelOrText}"]`,
-        `[role="toolbar"] button[aria-label*="${labelOrText}"]`,
-        `button[aria-label*="${labelOrText}"]`,
-        `button:has-text("${labelOrText}")`
-    ];
+async function pasteHTMLToEditor(page, html) {
+    if (!html || html.trim() === '') return;
 
-    for (const selector of selectors) {
-        const el = page.locator(selector).first();
-        if (await el.isVisible().catch(() => false)) {
-            await el.click();
-            await page.waitForTimeout(300);
-            return true;
-        }
-    }
-    return false;
-}
+    console.log(`[Publisher] HTML ペースト (${html.length} chars)`);
 
-/**
- * 見出しを挿入（ツールバーの見出しドロップダウンから選択）
- * @param {import('playwright').Page} page
- * @param {string} text
- * @param {number} level  2 = 大見出し, 3 = 小見出し
- */
-async function insertHeading(page, text, level) {
-    console.log(`[Publisher] 見出し H${level}: "${text}"`);
-
-    // X Articles ツールバーの「本文」ドロップダウンから見出しを選択
-    // スクリーンショットで確認: ツールバーに「本文」ボタンがあり、クリックするとドロップダウン
-    const styleDropdownSelectors = [
-        'button:has-text("本文")',
-        'button:has-text("Body")',
-        '[data-testid="toolBar"] button[aria-label*="Heading"]',
-        '[aria-label*="テキストスタイル"]',
-        '[aria-label*="text style"]'
-    ];
-
-    let dropdownOpened = false;
-    for (const selector of styleDropdownSelectors) {
-        const el = page.locator(selector).first();
-        if (await el.isVisible().catch(() => false)) {
-            await el.click();
-            await page.waitForTimeout(400);
-            dropdownOpened = true;
-            break;
-        }
-    }
-
-    if (dropdownOpened) {
-        // level 2 → 大見出し（Heading 1）、level 3 → 小見出し（Heading 2）
-        const menuCandidates = level === 2
-            ? ['大見出し', 'Heading 1', 'H1', '見出し1']
-            : ['小見出し', 'Heading 2', 'H2', '見出し2'];
-
-        let selected = false;
-        for (const label of menuCandidates) {
-            const item = page.locator(
-                `[role="menuitem"]:has-text("${label}"), [role="option"]:has-text("${label}"), li:has-text("${label}")`
-            ).first();
-            if (await item.isVisible().catch(() => false)) {
-                await item.click();
-                selected = true;
-                await page.waitForTimeout(300);
-                break;
-            }
-        }
-
-        if (!selected) {
-            await page.keyboard.press('Escape');
-        }
-    }
-
-    // テキストを入力して改行
-    await page.keyboard.type(text);
-    await page.keyboard.press('Enter');
-    await page.keyboard.press('Enter'); // 通常段落に戻る
-    await page.waitForTimeout(200);
-}
-
-/**
- * 段落（通常テキスト）を挿入
- * インライン書式（太字・斜体）も処理する
- * @param {import('playwright').Page} page
- * @param {string} text
- */
-async function insertParagraph(page, text) {
-    // インライン書式を処理しながらタイプ
-    const segments = splitInlineFormats(text);
-
-    for (const seg of segments) {
-        if (seg.bold) {
-            await page.keyboard.down('Control');
-            await page.keyboard.press('b');
-            await page.keyboard.up('Control');
-            await typeWithSpecialChars(page, seg.text);
-            await page.keyboard.down('Control');
-            await page.keyboard.press('b');
-            await page.keyboard.up('Control');
-        } else if (seg.italic) {
-            await page.keyboard.down('Control');
-            await page.keyboard.press('i');
-            await page.keyboard.up('Control');
-            await typeWithSpecialChars(page, seg.text);
-            await page.keyboard.down('Control');
-            await page.keyboard.press('i');
-            await page.keyboard.up('Control');
-        } else {
-            await typeWithSpecialChars(page, seg.text);
-        }
-    }
-
-    await page.keyboard.press('Enter');
-    await page.waitForTimeout(100);
-}
-
-/**
- * テキストを特殊文字に注意しながらタイプ
- * @param {import('playwright').Page} page
- * @param {string} text
- */
-async function typeWithSpecialChars(page, text) {
-    // 長いテキストはクリップボードを使う
-    if (text.length > 100) {
-        await page.evaluate((t) => {
-            const activeEl = document.activeElement;
-            if (activeEl) {
-                document.execCommand('insertText', false, t);
-            }
-        }, text);
-    } else {
-        await page.keyboard.type(text);
-    }
-}
-
-/**
- * インライン書式（**bold**, *italic*）をセグメントに分割
- * @param {string} text
- * @returns {Array<{text: string, bold: boolean, italic: boolean}>}
- */
-function splitInlineFormats(text) {
-    const segments = [];
-    // 太字と斜体を検出する正規表現
-    const regex = /\*\*(.+?)\*\*|\*([^*]+)\*|`([^`]+)`|(.+?)(?=\*\*|\*|`|$)/gs;
-
-    let lastIndex = 0;
-    let match;
-
-    while ((match = regex.exec(text)) !== null) {
-        if (match[1] !== undefined) {
-            // **bold**
-            segments.push({ text: match[1], bold: true, italic: false });
-        } else if (match[2] !== undefined) {
-            // *italic*
-            segments.push({ text: match[2], bold: false, italic: true });
-        } else if (match[3] !== undefined) {
-            // `code` → コードとしてではなく通常テキストとして挿入（インラインコードの特別処理は省略）
-            segments.push({ text: match[3], bold: false, italic: false });
-        } else if (match[4] !== undefined && match[4]) {
-            segments.push({ text: match[4], bold: false, italic: false });
-        }
-        lastIndex = regex.lastIndex;
-    }
-
-    // 残りのテキスト
-    if (lastIndex < text.length) {
-        segments.push({ text: text.slice(lastIndex), bold: false, italic: false });
-    }
-
-    // 空のセグメントを除去
-    return segments.filter(s => s.text);
-}
-
-/**
- * 箇条書きリストを挿入
- * @param {import('playwright').Page} page
- * @param {string[]} items
- */
-async function insertBulletList(page, items) {
-    console.log(`[Publisher] 箇条書きリスト: ${items.length}件`);
-
-    // ツールバーのリストボタンをクリック
-    const listBtnClicked = await clickToolbarButton(page, 'Unordered list') ||
-        await clickToolbarButton(page, 'Bullet list') ||
-        await clickToolbarButton(page, '箇条書き');
-
-    if (!listBtnClicked) {
-        // フォールバック: テキストとして入力
-        for (const item of items) {
-            await page.keyboard.type(`• ${item}`);
-            await page.keyboard.press('Enter');
-        }
-        return;
-    }
-
-    for (let i = 0; i < items.length; i++) {
-        const segments = splitInlineFormats(items[i]);
-        for (const seg of segments) {
-            if (seg.bold) {
-                await page.keyboard.down('Control');
-                await page.keyboard.press('b');
-                await page.keyboard.up('Control');
-                await typeWithSpecialChars(page, seg.text);
-                await page.keyboard.down('Control');
-                await page.keyboard.press('b');
-                await page.keyboard.up('Control');
-            } else if (seg.italic) {
-                await page.keyboard.down('Control');
-                await page.keyboard.press('i');
-                await page.keyboard.up('Control');
-                await typeWithSpecialChars(page, seg.text);
-                await page.keyboard.down('Control');
-                await page.keyboard.press('i');
-                await page.keyboard.up('Control');
-            } else {
-                await typeWithSpecialChars(page, seg.text);
-            }
-        }
-        if (i < items.length - 1) {
-            await page.keyboard.press('Enter');
-        }
-    }
-
-    // リストを終了して通常段落へ
-    await page.keyboard.press('Enter');
-    await page.keyboard.press('Enter');
-    await page.waitForTimeout(200);
-}
-
-/**
- * 番号付きリストを挿入
- * @param {import('playwright').Page} page
- * @param {string[]} items
- */
-async function insertNumberedList(page, items) {
-    console.log(`[Publisher] 番号付きリスト: ${items.length}件`);
-
-    const listBtnClicked = await clickToolbarButton(page, 'Ordered list') ||
-        await clickToolbarButton(page, 'Numbered list') ||
-        await clickToolbarButton(page, '番号付き');
-
-    if (!listBtnClicked) {
-        for (let idx = 0; idx < items.length; idx++) {
-            await page.keyboard.type(`${idx + 1}. ${items[idx]}`);
-            await page.keyboard.press('Enter');
-        }
-        return;
-    }
-
-    for (let i = 0; i < items.length; i++) {
-        await typeWithSpecialChars(page, items[i]);
-        if (i < items.length - 1) {
-            await page.keyboard.press('Enter');
-        }
-    }
-
-    await page.keyboard.press('Enter');
-    await page.keyboard.press('Enter');
-    await page.waitForTimeout(200);
-}
-
-/**
- * 引用ブロックを挿入
- * @param {import('playwright').Page} page
- * @param {string} text
- */
-async function insertBlockquote(page, text) {
-    console.log(`[Publisher] 引用ブロック`);
-
-    const quoteBtnClicked = await clickToolbarButton(page, 'Quote') ||
-        await clickToolbarButton(page, 'Blockquote') ||
-        await clickToolbarButton(page, '引用');
-
-    if (!quoteBtnClicked) {
-        // フォールバック
-        const lines = text.split('\n');
-        for (const line of lines) {
-            await page.keyboard.type(`> ${line}`);
-            await page.keyboard.press('Enter');
-        }
-        return;
-    }
-
-    const lines = text.split('\n');
-    for (let i = 0; i < lines.length; i++) {
-        await typeWithSpecialChars(page, lines[i]);
-        if (i < lines.length - 1) {
-            await page.keyboard.down('Shift');
-            await page.keyboard.press('Enter');
-            await page.keyboard.up('Shift');
-        }
-    }
-
-    await page.keyboard.press('Enter');
-    await page.keyboard.press('Enter');
-    await page.waitForTimeout(200);
-}
-
-/**
- * コードブロックを挿入
- * @param {import('playwright').Page} page
- * @param {string} code
- */
-async function insertCode(page, code) {
-    console.log(`[Publisher] コードブロック`);
-
-    // Insert メニューまたはツールバーから "Code" を選択
-    const codeBtnClicked = await clickToolbarButton(page, 'Code block') ||
-        await clickToolbarButton(page, 'Code') ||
-        await clickToolbarButton(page, 'コード');
-
-    if (!codeBtnClicked) {
-        // フォールバック: Markdown 記法でそのまま入力
-        await page.keyboard.type('```');
-        await page.keyboard.press('Enter');
-        await page.keyboard.type(code);
-        await page.keyboard.press('Enter');
-        await page.keyboard.type('```');
-        await page.keyboard.press('Enter');
-        return;
-    }
-
-    await page.keyboard.type(code);
-    await page.keyboard.press('Enter');
-    await page.keyboard.press('Enter');
-    await page.waitForTimeout(200);
-}
-
-/**
- * 仕切り線（Divider）を挿入
- * @param {import('playwright').Page} page
- */
-async function insertDivider(page) {
-    console.log(`[Publisher] 仕切り線`);
-
-    await clickToolbarButton(page, 'Divider') ||
-        await clickToolbarButton(page, 'Horizontal rule') ||
-        await clickToolbarButton(page, '区切り線');
-
+    await focusBody(page);
     await page.waitForTimeout(300);
+
+    await page.evaluate((htmlContent) => {
+        const editorEl = document.querySelector('.public-DraftEditor-content');
+        if (!editorEl) throw new Error('DraftJS editor (.public-DraftEditor-content) not found');
+
+        editorEl.focus();
+
+        // DataTransfer に HTML と plain text の両方をセット
+        const dataTransfer = new DataTransfer();
+        dataTransfer.setData('text/html', htmlContent);
+        dataTransfer.setData('text/plain', htmlContent.replace(/<[^>]*>/g, ''));
+
+        // DraftJS の onPaste ハンドラを起動
+        const pasteEvent = new ClipboardEvent('paste', {
+            bubbles: true,
+            cancelable: true,
+            clipboardData: dataTransfer
+        });
+
+        editorEl.dispatchEvent(pasteEvent);
+    }, html);
+
+    await page.waitForTimeout(800);
 }
+
+// ========================================
+// Image Insertion
+// ========================================
 
 /**
  * 画像をアップロード・挿入
@@ -795,11 +542,9 @@ async function insertImage(page, imagePath) {
         await page.keyboard.press('Enter');
         await page.waitForTimeout(500);
 
-        // ─── Step 1: ツールバー全ボタンを試して「メディア」メニューを開く
+        // ─── Step 1: 「挿入」ボタン → 「メディア」を開く
         let mediaMenuOpened = false;
 
-        // スクリーンショット確認済み: ツールバーに「挿入▼」ボタンが存在する
-        // まず「挿入」テキストのボタンを直接試す
         for (const quickSel of ['button:has-text("挿入")', 'button[aria-label="Insert"]', 'button[aria-label="挿入"]']) {
             const quickBtn = page.locator(quickSel).first();
             if (await quickBtn.isVisible().catch(() => false)) {
@@ -817,39 +562,40 @@ async function insertImage(page, imagePath) {
             }
         }
 
-        const allToolbarBtns = mediaMenuOpened ? [] : await page.locator(
-            '[data-testid="toolBar"] button, [data-testid="toolbar"] button, [role="toolbar"] button'
-        ).all();
+        if (!mediaMenuOpened) {
+            // ツールバー全ボタンを走査してフォールバック
+            const allToolbarBtns = await page.locator(
+                '[data-testid="toolBar"] button, [data-testid="toolbar"] button, [role="toolbar"] button'
+            ).all();
 
-        const toolbarLabels = await Promise.all(allToolbarBtns.map(b => b.getAttribute('aria-label').catch(() => '')));
-        console.log('[Publisher] ツールバーボタン一覧:', toolbarLabels.filter(Boolean).join(', '));
+            const toolbarLabels = await Promise.all(allToolbarBtns.map(b => b.getAttribute('aria-label').catch(() => '')));
+            console.log('[Publisher] ツールバーボタン一覧:', toolbarLabels.filter(Boolean).join(', '));
 
-        for (let i = 0; i < allToolbarBtns.length; i++) {
-            const btn = allToolbarBtns[i];
-            if (!await btn.isVisible().catch(() => false)) continue;
+            for (let i = 0; i < allToolbarBtns.length; i++) {
+                const btn = allToolbarBtns[i];
+                if (!await btn.isVisible().catch(() => false)) continue;
 
-            try {
-                await btn.click();
-                await page.waitForTimeout(400);
+                try {
+                    await btn.click();
+                    await page.waitForTimeout(400);
 
-                const mediaItem = page.locator(
-                    '[role="menuitem"]:has-text("メディア"), [role="menuitem"]:has-text("Media")'
-                ).first();
+                    const mediaItem = page.locator(
+                        '[role="menuitem"]:has-text("メディア"), [role="menuitem"]:has-text("Media")'
+                    ).first();
 
-                if (await mediaItem.isVisible().catch(() => false)) {
-                    console.log(`[Publisher] 挿入メニュー発見 (ボタン: "${toolbarLabels[i]}")`);
+                    if (await mediaItem.isVisible().catch(() => false)) {
+                        console.log(`[Publisher] 挿入メニュー発見 (ボタン: "${toolbarLabels[i]}")`);
+                        await mediaItem.click();
+                        mediaMenuOpened = true;
+                        await page.waitForTimeout(1500);
+                        break;
+                    }
 
-                    // メディアをクリック → カルーセルダイアログが開く（filechooserではない）
-                    await mediaItem.click();
-                    mediaMenuOpened = true;
-                    await page.waitForTimeout(1500);
-                    break;
+                    await page.keyboard.press('Escape').catch(() => {});
+                    await page.waitForTimeout(200);
+                } catch {
+                    await page.keyboard.press('Escape').catch(() => {});
                 }
-
-                await page.keyboard.press('Escape').catch(() => {});
-                await page.waitForTimeout(200);
-            } catch {
-                await page.keyboard.press('Escape').catch(() => {});
             }
         }
 
@@ -858,11 +604,7 @@ async function insertImage(page, imagePath) {
             return false;
         }
 
-        // ─── Step 2: カルーセルダイアログ内の file input を直接探す
-        //   X Articles はカルーセルUI（ネイティブファイルダイアログではなく
-        //   upload.x.com/i/media/upload.json へ直接アップロードするカスタムUI）
-
-        // まず隠し input[type="file"] を直接探す（多くのカスタムアップロードUIが持つ）
+        // ─── Step 2: input[type="file"] にファイルをセット
         const fileInput = page.locator('input[type="file"]').first();
         const fileInputCount = await fileInput.count();
 
@@ -870,15 +612,11 @@ async function insertImage(page, imagePath) {
             console.log('[Publisher] input[type="file"] 検出 → 直接ファイルをセット');
             await fileInput.setInputFiles(imagePath);
         } else {
-            // カルーセルダイアログ内のアップロードボタンを探す
-            // ネットワーク調査: "メディア" → カルーセル → ファイル選択 → upload.x.com
             const uploadBtnSelectors = [
                 'button:has-text("Upload from computer")',
                 'button:has-text("コンピューターからアップロード")',
                 'button:has-text("ファイルを選択")',
-                'button:has-text("アップロード")',
                 '[role="dialog"] input[type="file"]',
-                '[role="dialog"] button',
             ];
 
             let chooser = null;
@@ -886,11 +624,10 @@ async function insertImage(page, imagePath) {
                 const el = page.locator(sel).first();
                 if (!await el.isVisible().catch(() => false)) continue;
 
-                // まず直接 file input かを確認
                 const tag = await el.evaluate(n => n.tagName).catch(() => '');
                 if (tag === 'INPUT') {
                     await el.setInputFiles(imagePath);
-                    chooser = true; // フラグとして使用
+                    chooser = true;
                     break;
                 }
 
@@ -907,19 +644,33 @@ async function insertImage(page, imagePath) {
                 await chooser.setFiles(imagePath);
             } else if (!chooser) {
                 console.warn('[Publisher] ⚠️  ファイルアップロードUIが見つかりません');
-
-                // デバッグ: ダイアログ内のボタンを全部ログ
-                const dialogBtns = await page.locator('[role="dialog"] button').all();
-                const dialogBtnTexts = await Promise.all(dialogBtns.map(b => b.textContent().catch(() => '')));
-                console.warn('[Publisher] ダイアログ内ボタン:', dialogBtnTexts.filter(Boolean).join(', '));
                 return false;
             }
         }
 
-        // アップロード完了を待つ（upload.x.com へのリクエスト完了 ≈ progressbar 消滅）
+        // アップロード完了を待つ
         await page.waitForTimeout(5000);
         await page.waitForSelector('[role="progressbar"]', { state: 'hidden', timeout: 30000 }).catch(() => {});
         await page.waitForTimeout(1500);
+
+        // ─── Step 3: カルーセルダイアログ / オーバーレイを閉じる
+        // #layers div は X のモーダル・トースト層。ダイアログが残るとポインターイベントをブロックする
+        await page.keyboard.press('Escape').catch(() => {});
+        await page.waitForTimeout(500);
+
+        // #layers の子要素が空になるまで待つ
+        await page.waitForFunction(() => {
+            const layers = document.getElementById('layers');
+            if (!layers) return true;
+            return layers.children.length === 0;
+        }, { timeout: 10000 }).catch(() => {
+            console.warn('[Publisher] ⚠️  #layers オーバーレイがタイムアウト内に消えませんでした');
+        });
+        await page.waitForTimeout(500);
+
+        // エディタ本文に再フォーカス
+        await focusBody(page);
+        await page.waitForTimeout(300);
 
         console.log(`[Publisher] ✅ 画像挿入完了`);
         return true;
@@ -929,22 +680,20 @@ async function insertImage(page, imagePath) {
     }
 }
 
+// ========================================
+// Draft Save
+// ========================================
+
 /**
  * 下書きを保存して記事 URL を取得
- * @param {import('playwright').Page} page
- * @returns {Promise<string>}
  */
 async function saveDraft(page) {
     console.log('[Publisher] 下書き保存中...');
 
-    // X Articles は自動保存される（「前回の保存: たった今」と表示）
-    // URL が compose/articles/edit/{id} になるのを待つ
     await page.waitForTimeout(2000);
 
-    // URL に記事 ID が含まれているか確認
     let currentUrl = page.url();
     if (!currentUrl.includes('/edit/')) {
-        // まだ ID がない場合は少し待つ
         await page.waitForTimeout(3000);
         currentUrl = page.url();
     }
@@ -958,16 +707,13 @@ async function saveDraft(page) {
 // ========================================
 
 /**
- * X Articles に Markdown を投稿
- * @param {Object} params
- * @param {string} params.title
- * @param {string} params.markdown
- * @param {Array<{fileName: string, absolutePath: string}>} params.images
- * @param {boolean} params.headless
- * @returns {Promise<{articleUrl: string}>}
- */
-/**
- * ページに Markdown の各要素を入力する（コンテキスト非依存のメインロジック）
+ * Markdown → HTML 変換 + 画像位置での個別挿入
+ *
+ * 処理フロー:
+ * 1. Markdown を parseMarkdownElements でブロック配列に変換
+ * 2. 画像ブロックを区切りとして連続するテキストブロックを HTML に変換
+ * 3. テキストチャンクは pasteHTMLToEditor で DraftJS に一括ペースト
+ * 4. 画像は insertImage で個別ファイルアップロード
  */
 async function publishContent(page, title, markdown, images) {
     await createNewArticle(page);
@@ -985,28 +731,45 @@ async function publishContent(page, title, markdown, images) {
         }
     }
 
-    for (const element of elements) {
-        switch (element.type) {
-            case 'heading':      await insertHeading(page, element.content, element.level); break;
-            case 'paragraph':    await insertParagraph(page, element.content); break;
-            case 'bulletList':   await insertBulletList(page, element.items); break;
-            case 'numberedList': await insertNumberedList(page, element.items); break;
-            case 'quote':        await insertBlockquote(page, element.content); break;
-            case 'code':         await insertCode(page, element.content); break;
-            case 'divider':      await insertDivider(page); break;
-            case 'image': {
-                const imgPath = imageMap.get(element.fileName);
-                if (imgPath) await insertImage(page, imgPath);
-                else console.warn(`[Publisher] ⚠️  画像スキップ: ${element.fileName}`);
-                break;
-            }
+    let textBuffer = [];
+
+    const flushTextBuffer = async () => {
+        if (textBuffer.length === 0) return;
+        const html = elementsToHTML(textBuffer);
+        if (html.trim()) {
+            await pasteHTMLToEditor(page, html);
         }
-        await page.waitForTimeout(150);
+        textBuffer = [];
+    };
+
+    for (const element of elements) {
+        if (element.type === 'image') {
+            // テキストチャンクを先にペースト
+            await flushTextBuffer();
+
+            // 画像を挿入位置に個別アップロード
+            const imgPath = imageMap.get(element.fileName);
+            if (imgPath) {
+                await insertImage(page, imgPath);
+            } else {
+                console.warn(`[Publisher] ⚠️  画像スキップ: ${element.fileName}`);
+            }
+        } else {
+            textBuffer.push(element);
+        }
+
+        await page.waitForTimeout(100);
     }
+
+    // 末尾のテキストをペースト
+    await flushTextBuffer();
 
     return await saveDraft(page);
 }
 
+/**
+ * X Articles に Markdown を投稿
+ */
 async function publishToX({ title, markdown, images = [], headless = true }) {
     console.log('\n[Publisher] X Articles 投稿開始');
     console.log(`[Publisher] タイトル: "${title}"`);
@@ -1027,8 +790,6 @@ async function publishToX({ title, markdown, images = [], headless = true }) {
         throw new Error('auth_token が見つかりません。「Chrome でログイン」を再実行してください。');
     }
 
-    // ★ 使い捨て一時プロファイルで Chrome を起動してプロファイルピッカーをスキップ
-    //   クッキーはプロファイルに頼らず CDP Network.setCookie で直接注入する
     const CDP_PORT = 9223;
     const tempProfileDir = path.join(os.tmpdir(), `x-pub-${Date.now()}`);
     let chromeProc = null;
@@ -1036,7 +797,7 @@ async function publishToX({ title, markdown, images = [], headless = true }) {
     try {
         const chromeArgs = [
             `--remote-debugging-port=${CDP_PORT}`,
-            `--user-data-dir=${tempProfileDir}`,  // プロファイルピッカーを回避
+            `--user-data-dir=${tempProfileDir}`,
             '--no-first-run',
             '--no-default-browser-check',
             '--disable-sync',
@@ -1060,7 +821,7 @@ async function publishToX({ title, markdown, images = [], headless = true }) {
         const page = await context.newPage();
         page.setDefaultTimeout(60000);
 
-        // x.com のコンテキストにクッキーをインジェクト（ナビゲーション前に設定）
+        // x.com のコンテキストにクッキーをインジェクト
         const cdpSession = await context.newCDPSession(page);
         await cdpSession.send('Network.enable');
         for (const cookie of storageState.cookies) {
@@ -1087,7 +848,6 @@ async function publishToX({ title, markdown, images = [], headless = true }) {
     } finally {
         if (browser) { try { await browser.close(); } catch {} }
         if (chromeProc) { try { chromeProc.kill('SIGTERM'); } catch {} }
-        // 一時プロファイルを削除
         try { fs.rmSync(tempProfileDir, { recursive: true, force: true }); } catch {}
     }
 }
@@ -1125,7 +885,6 @@ title: "テスト記事"
 
 \`\`\`javascript
 const hello = "world";
-console.log(hello);
 \`\`\`
 
 ---
