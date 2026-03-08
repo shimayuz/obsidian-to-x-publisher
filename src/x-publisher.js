@@ -522,6 +522,84 @@ async function pasteHTMLToEditor(page, html) {
 }
 
 // ========================================
+// Toolbar Helpers (Code / Divider)
+// ========================================
+
+/**
+ * 「挿入」ドロップダウンから指定ラベルのメニューアイテムをクリックする
+ * @param {import('playwright').Page} page
+ * @param {string[]} labels - 試すラベル（日本語・英語の両方を渡す）
+ * @returns {Promise<boolean>} 成功したか
+ */
+async function selectFromInsertMenu(page, labels) {
+    for (const btnSel of ['button:has-text("挿入")', 'button[aria-label="Insert"]', 'button[aria-label="挿入"]']) {
+        const btn = page.locator(btnSel).first();
+        if (!await btn.isVisible().catch(() => false)) continue;
+
+        await btn.click();
+        await page.waitForTimeout(400);
+
+        for (const label of labels) {
+            const item = page.locator(`[role="menuitem"]:has-text("${label}")`).first();
+            if (await item.isVisible().catch(() => false)) {
+                await item.click();
+                await page.waitForTimeout(500);
+                return true;
+            }
+        }
+
+        await page.keyboard.press('Escape').catch(() => {});
+        await page.waitForTimeout(200);
+        break;
+    }
+    return false;
+}
+
+/**
+ * コードブロックを挿入
+ * DraftJS は <pre><code> paste を code-block にマップしないため
+ * ツールバー「挿入」→「コード」を使い、失敗時は HTML paste にフォールバック
+ */
+async function insertCodeBlock(page, code) {
+    console.log('[Publisher] コードブロック挿入');
+
+    await focusBody(page);
+    await page.waitForTimeout(200);
+
+    const opened = await selectFromInsertMenu(page, ['コード', 'Code', 'コードブロック', 'Code block']);
+
+    if (opened) {
+        await page.keyboard.type(code);
+        await page.keyboard.press('Enter');
+        await page.keyboard.press('Enter');
+        await page.waitForTimeout(300);
+        console.log('[Publisher] ✅ コードブロック挿入完了（挿入メニュー）');
+        return;
+    }
+
+    // フォールバック: <pre> のみで paste（一部 DraftJS 実装で code-block に変換される）
+    console.log('[Publisher] ⚠️  挿入メニューにコードなし → <pre> paste フォールバック');
+    await pasteHTMLToEditor(page, `<pre>${escapeHTML(code)}</pre>`);
+}
+
+/**
+ * 区切り線を挿入
+ * <hr> paste が DraftJS で無視される場合の備え
+ */
+async function insertDividerBlock(page) {
+    console.log('[Publisher] 区切り線挿入');
+
+    await focusBody(page);
+    await page.waitForTimeout(200);
+
+    const opened = await selectFromInsertMenu(page, ['区切り線', 'Divider', 'Horizontal rule']);
+    if (!opened) {
+        await pasteHTMLToEditor(page, '<hr>');
+    }
+    await page.waitForTimeout(300);
+}
+
+// ========================================
 // Image Insertion
 // ========================================
 
@@ -744,16 +822,18 @@ async function publishContent(page, title, markdown, images) {
 
     for (const element of elements) {
         if (element.type === 'image') {
-            // テキストチャンクを先にペースト
             await flushTextBuffer();
-
-            // 画像を挿入位置に個別アップロード
             const imgPath = imageMap.get(element.fileName);
-            if (imgPath) {
-                await insertImage(page, imgPath);
-            } else {
-                console.warn(`[Publisher] ⚠️  画像スキップ: ${element.fileName}`);
-            }
+            if (imgPath) await insertImage(page, imgPath);
+            else console.warn(`[Publisher] ⚠️  画像スキップ: ${element.fileName}`);
+        } else if (element.type === 'code') {
+            // DraftJS が <pre><code> paste を code-block に変換しないためツールバー経由
+            await flushTextBuffer();
+            await insertCodeBlock(page, element.content);
+        } else if (element.type === 'divider') {
+            // <hr> paste が無視されるケースに備えてツールバー経由
+            await flushTextBuffer();
+            await insertDividerBlock(page);
         } else {
             textBuffer.push(element);
         }
