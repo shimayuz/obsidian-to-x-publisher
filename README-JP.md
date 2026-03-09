@@ -40,12 +40,11 @@ cd obsidian-to-x-publisher
 npm install
 npx playwright install chromium
 
-# X にログインして Cookie を保存（初回のみ）
-npm run login
-
 # サーバー起動（port 3001）
 npm run server
 ```
+
+セッション Cookie は Obsidian プラグイン設定画面から設定（DevTools 手動入力 or Chrome ログイン）。
 
 詳細は [docs/setup-and-usage.md](docs/setup-and-usage.md) を参照。
 
@@ -80,23 +79,15 @@ src/
   x-api-publisher.js   # GraphQL API + 画像アップロード + Markdown変換
   server.js            # Express サーバー (port 3001)
 scripts/
-  login.js             # 初回ログイン・Cookie保存
   capture-api.js       # ブラウザAPIキャプチャ（調査用）
 plugin/                # Obsidian プラグイン本体
 docs/                  # 詳細ドキュメント
-  MoC-obsidian-to-x-publisher.md
-  api-reference.md
-  image-upload-process.md
-  markdown-draftjs-mapping.md
-  setup-and-usage.md
-  brat-setup.md
 ```
 
 ## npm scripts
 
 | コマンド | 内容 |
 | ------- | ---- |
-| `npm run login` | 初回ログイン・Cookie保存 |
 | `npm run server` | サーバー起動 (port 3001) |
 | `npm run capture-api` | ブラウザAPIキャプチャ（調査用） |
 

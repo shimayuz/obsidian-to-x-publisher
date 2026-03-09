@@ -1,9 +1,9 @@
 {
     "id": "x-article-publisher",
     "name": "X Article Publisher",
-    "version": "1.10.0",
+    "version": "2.0.0",
     "minAppVersion": "1.0.0",
-    "description": "Publish Obsidian notes to X (Twitter) Articles via local Playwright server",
+    "description": "Publish Obsidian notes to X (Twitter) Articles via GraphQL API",
     "author": "shimayuz",
     "authorUrl": "https://github.com/shimayuz",
     "isDesktopOnly": true

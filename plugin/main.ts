@@ -7,18 +7,12 @@ import * as path from 'path';
 
 interface XPublisherSettings {
     serverUrl: string;
-    clientId: string;
-    clientSecret: string;
-    headlessMode: boolean;
     openAfterPublish: boolean;
     showNotification: boolean;
 }
 
 const DEFAULT_SETTINGS: XPublisherSettings = {
     serverUrl: 'http://127.0.0.1:3001',
-    clientId: '',
-    clientSecret: '',
-    headlessMode: true,
     openAfterPublish: true,
     showNotification: true
 };
@@ -41,12 +35,9 @@ interface PublishResult {
     error?: string;
 }
 
-interface OAuthStatus {
-    status: 'idle' | 'pending' | 'success' | 'error';
-    error: string | null;
-    authenticated: boolean;   // backward compat: sessionReady
-    oauthConnected?: boolean; // Bearer token obtained
-    sessionReady?: boolean;   // Playwright cookies set
+interface SessionStatus {
+    sessionReady: boolean;
+    browserSetupStatus: string;
 }
 
 // ========================================
@@ -56,47 +47,32 @@ interface OAuthStatus {
 async function updateFrontmatter(app: App, file: TFile, updates: Record<string, any>): Promise<void> {
     const content = await app.vault.read(file);
     const frontmatterRegex = /^---\s*\n([\s\S]*?)\n---\s*\n?/;
-    const match = content.match(frontmatterRegex);
-
     let newContent: string;
 
+    const match = content.match(frontmatterRegex);
     if (match) {
-        const frontmatterStr = match[1];
-        const frontmatterLines = frontmatterStr.split('\n');
-        const frontmatterObj: Record<string, any> = {};
+        const existingLines = match[1].split('\n');
+        const existingMap = new Map<string, number>();
+        existingLines.forEach((line, idx) => {
+            const keyMatch = line.match(/^(\S+):/);
+            if (keyMatch) existingMap.set(keyMatch[1], idx);
+        });
 
-        for (const line of frontmatterLines) {
-            const colonIndex = line.indexOf(':');
-            if (colonIndex > 0) {
-                const key = line.substring(0, colonIndex).trim();
-                let value = line.substring(colonIndex + 1).trim();
-                if ((value.startsWith('"') && value.endsWith('"')) ||
-                    (value.startsWith("'") && value.endsWith("'"))) {
-                    value = value.slice(1, -1);
-                }
-                frontmatterObj[key] = value;
-            }
-        }
-
+        const newFrontmatterLines = [...existingLines];
         for (const [key, value] of Object.entries(updates)) {
-            if (value === null || value === undefined) {
-                delete frontmatterObj[key];
+            if (value === null || value === undefined) continue;
+            const formatted = value === ''
+                ? `${key}: ""`
+                : typeof value === 'string' && (value.includes(':') || value.includes('#') || value.includes('"'))
+                    ? `${key}: "${value.replace(/"/g, '\\"')}"`
+                    : `${key}: ${value}`;
+            const existingIdx = existingMap.get(key);
+            if (existingIdx !== undefined) {
+                newFrontmatterLines[existingIdx] = formatted;
             } else {
-                frontmatterObj[key] = value;
+                newFrontmatterLines.push(formatted);
             }
         }
-
-        const newFrontmatterLines: string[] = [];
-        for (const [key, value] of Object.entries(frontmatterObj)) {
-            if (value === '' || value === null || value === undefined) {
-                newFrontmatterLines.push(`${key}: ""`);
-            } else if (typeof value === 'string' && (value.includes(':') || value.includes('#') || value.includes('"'))) {
-                newFrontmatterLines.push(`${key}: "${value.replace(/"/g, '\\"')}"`);
-            } else {
-                newFrontmatterLines.push(`${key}: ${value}`);
-            }
-        }
-
         const newFrontmatter = `---\n${newFrontmatterLines.join('\n')}\n---\n`;
         newContent = content.replace(frontmatterRegex, newFrontmatter);
     } else {
@@ -154,48 +130,23 @@ class XPublisherClient {
         }
     }
 
-    async startOAuth(clientId: string, clientSecret?: string): Promise<void> {
-        const body: Record<string, string> = { clientId };
-        if (clientSecret) body.clientSecret = clientSecret;
-
-        const response = await requestUrl({
-            url: `${this.serverUrl}/oauth/start`,
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body),
-            throw: false
-        });
-
-        // 409 = already pending → OK to just poll
-        if (response.status === 409) return;
-
-        if (response.status !== 200) {
-            const parsed = JSON.parse(response.text);
-            throw new Error(parsed.error || `HTTP ${response.status}`);
-        }
-    }
-
-    async getOAuthStatus(): Promise<OAuthStatus> {
+    async getSessionStatus(): Promise<SessionStatus> {
         try {
             const response = await requestUrl({
-                url: `${this.serverUrl}/oauth/status`,
+                url: `${this.serverUrl}/health`,
                 method: 'GET',
                 throw: false
             });
-
             if (response.status !== 200) {
-                return { status: 'error', error: 'サーバーを再起動してください（npm run server）', authenticated: false };
+                return { sessionReady: false, browserSetupStatus: 'error' };
             }
-
-            // Guard against non-JSON responses (e.g. old server returning HTML)
-            const text = response.text?.trim() ?? '';
-            if (!text.startsWith('{')) {
-                return { status: 'error', error: 'サーバーを再起動してください（npm run server）', authenticated: false };
-            }
-
-            return JSON.parse(text) as OAuthStatus;
+            const data = JSON.parse(response.text);
+            return {
+                sessionReady: !!data.sessionReady,
+                browserSetupStatus: data.browserSetupStatus || 'idle'
+            };
         } catch {
-            return { status: 'error', error: 'サーバーが起動していません（npm run server）', authenticated: false };
+            return { sessionReady: false, browserSetupStatus: 'error' };
         }
     }
 
@@ -225,7 +176,7 @@ class XPublisherClient {
             body: JSON.stringify({}),
             throw: false
         });
-        if (response.status === 409) return; // already running
+        if (response.status === 409) return;
         if (response.status === 503) {
             const parsed = JSON.parse(response.text);
             throw new Error(parsed.error || 'Playwright が必要です');
@@ -279,14 +230,12 @@ class XPublisherClient {
         title: string;
         markdown: string;
         images?: { fileName: string; absolutePath: string }[];
-        headless?: boolean;
     }): Promise<PublishResult> {
         try {
             const bodyStr = JSON.stringify({
                 title: params.title,
                 markdown: params.markdown,
-                images: params.images || [],
-                headless: params.headless !== false
+                images: params.images || []
             });
 
             const response = await requestUrl({
@@ -344,7 +293,6 @@ async function extractImages(app: App, content: string, file: TFile): Promise<Im
     const fileDir = file.parent?.path || '';
     const vaultPath = (app.vault.adapter as any).basePath || '';
 
-    // Obsidian 形式: ![[image.png]]
     const obsidianRegex = /!\[\[([^\]|]+)(?:\|[^\]]+)?\]\]/g;
     let match;
     while ((match = obsidianRegex.exec(content)) !== null) {
@@ -352,7 +300,6 @@ async function extractImages(app: App, content: string, file: TFile): Promise<Im
         if (info) images.push(info);
     }
 
-    // 標準 Markdown: ![alt](path)
     const mdRegex = /!\[([^\]]*)\]\(([^)]+)\)/g;
     while ((match = mdRegex.exec(content)) !== null) {
         const srcPath = match[2].trim();
@@ -453,7 +400,6 @@ class PublishConfirmModal extends Modal {
 
 class XPublisherSettingTab extends PluginSettingTab {
     plugin: XPublisherPlugin;
-    private pollingActive = false;
 
     constructor(app: App, plugin: XPublisherPlugin) {
         super(app, plugin);
@@ -461,110 +407,9 @@ class XPublisherSettingTab extends PluginSettingTab {
     }
 
     display(): void {
-        this.pollingActive = false; // Cancel any running polling
-
         const { containerEl } = this;
         containerEl.empty();
         containerEl.createEl('h2', { text: 'X Article Publisher 設定' });
-
-        // ─── X Developer App ───
-        containerEl.createEl('h3', { text: 'X Developer App' });
-
-        const descEl = containerEl.createEl('p', { cls: 'setting-item-description' });
-        descEl.style.cssText = 'margin: 0 0 12px; font-size: 13px; color: var(--text-muted);';
-        descEl.innerHTML =
-            '<a href="https://developer.x.com" target="_blank">developer.x.com</a> でアプリを作成し、' +
-            'OAuth 2.0 を有効化。Callback URI に ' +
-            '<code>http://127.0.0.1:3001/oauth/callback</code> を登録してください。';
-
-        new Setting(containerEl)
-            .setName('Client ID')
-            .setDesc('X Developer Portal → Keys and tokens → Client ID')
-            .addText(text => text
-                .setPlaceholder('例: xxxxxxxxxxxxxxxxxxxx')
-                .setValue(this.plugin.settings.clientId)
-                .onChange(async (value) => {
-                    this.plugin.settings = { ...this.plugin.settings, clientId: value };
-                    await this.plugin.saveSettings();
-                }));
-
-        let secretInputEl: HTMLInputElement;
-        new Setting(containerEl)
-            .setName('Client Secret')
-            .setDesc('Confidential Client の場合のみ入力（Public Client は空欄で OK）')
-            .addText(text => {
-                text.inputEl.type = 'password';
-                secretInputEl = text.inputEl;
-                text.setPlaceholder('Client Secret（任意）')
-                    .setValue(this.plugin.settings.clientSecret)
-                    .onChange(async (value) => {
-                        this.plugin.settings = { ...this.plugin.settings, clientSecret: value };
-                        await this.plugin.saveSettings();
-                    });
-            })
-            .addExtraButton(button => {
-                button
-                    .setIcon('eye')
-                    .setTooltip('表示/非表示')
-                    .onClick(() => {
-                        const hidden = secretInputEl.type === 'password';
-                        secretInputEl.type = hidden ? 'text' : 'password';
-                        button.setIcon(hidden ? 'eye-off' : 'eye');
-                    });
-            });
-
-        // ─── X アカウント連携 ───
-        containerEl.createEl('h3', { text: 'X アカウント連携' });
-
-        const statusEl = containerEl.createDiv();
-        statusEl.style.cssText = 'padding: 4px 0 12px; font-size: 13px;';
-        statusEl.setText('● 接続状態を確認中...');
-
-        let connectBtn!: ButtonComponent;
-        let sessionStatusEl!: HTMLElement; // logout ボタンから参照するため早期宣言
-
-        new Setting(containerEl)
-            .setName('X アカウントを連携')
-            .setDesc('クリックするとブラウザが起動し、X のログイン画面が表示されます')
-            .addButton(button => {
-                connectBtn = button;
-                button
-                    .setButtonText('連携する')
-                    .setCta()
-                    .onClick(() => this.startOAuthFlow(connectBtn, statusEl));
-            });
-
-        new Setting(containerEl)
-            .setName('ログアウト / 連携解除')
-            .setDesc('X との連携を解除し、保存された Cookie・Chrome プロファイルをすべて削除します')
-            .addButton(button => {
-                button
-                    .setButtonText('ログアウト')
-                    .setWarning()
-                    .onClick(async () => {
-                        const isServerUp = await this.plugin.xClient.healthCheck();
-                        if (!isServerUp) {
-                            new Notice('サーバーが起動していません。npm run server を実行してください。', 6000);
-                            return;
-                        }
-                        button.setButtonText('ログアウト中...').setDisabled(true);
-                        try {
-                            await this.plugin.xClient.logout();
-                            statusEl.setText('● 未接続');
-                            statusEl.style.color = 'var(--text-muted)';
-                            if (sessionStatusEl) {
-                                sessionStatusEl.setText('● 未設定（auth_token を入力してください）');
-                                sessionStatusEl.style.color = 'var(--text-muted)';
-                            }
-                            connectBtn.setButtonText('連携する').setDisabled(false);
-                            new Notice('ログアウトしました。再度「連携する」から認証してください。', 6000);
-                        } catch (err: any) {
-                            new Notice(`ログアウト失敗: ${err.message}`);
-                        } finally {
-                            button.setButtonText('ログアウト').setDisabled(false);
-                        }
-                    });
-            });
 
         // ─── セッション Cookie 設定 ───
         containerEl.createEl('h3', { text: 'セッション Cookie 設定' });
@@ -572,7 +417,6 @@ class XPublisherSettingTab extends PluginSettingTab {
         const cookieDescEl = containerEl.createEl('p', { cls: 'setting-item-description' });
         cookieDescEl.style.cssText = 'margin: 0 0 12px; font-size: 13px; color: var(--text-muted);';
         cookieDescEl.innerHTML =
-            '⚠️ <b>OAuth 認証後に設定が必要です（一度だけ）</b><br><br>' +
             '<b>手順：</b> <a href="https://x.com" target="_blank">x.com</a> にログインしているブラウザで<br>' +
             '開発者ツール（Mac: <code>Cmd+Option+I</code> / Win: <code>F12</code>）を開き、<br>' +
             '<b>Application</b> タブ → <b>Cookies</b> → <b>https://x.com</b> を選択し、<br>' +
@@ -615,7 +459,7 @@ class XPublisherSettingTab extends PluginSettingTab {
                     });
             });
 
-        sessionStatusEl = containerEl.createDiv();
+        const sessionStatusEl = containerEl.createDiv();
         sessionStatusEl.style.cssText = 'padding: 4px 0 12px; font-size: 13px;';
         sessionStatusEl.setText('● 状態を確認中...');
 
@@ -636,7 +480,7 @@ class XPublisherSettingTab extends PluginSettingTab {
                         button.setButtonText('保存中...').setDisabled(true);
                         try {
                             await this.plugin.xClient.saveSessionCookies(authToken, ct0 || undefined);
-                            sessionStatusEl.setText('● Cookie 設定済み ✅（投稿可能）');
+                            sessionStatusEl.setText('● Cookie 設定済み（投稿可能）');
                             sessionStatusEl.style.color = '#10b981';
                             authTokenInputEl.value = '';
                             ct0InputEl.value = '';
@@ -651,16 +495,15 @@ class XPublisherSettingTab extends PluginSettingTab {
                     });
             });
 
-        // connectBtn と sessionStatusEl が揃ったのでステータス確認
-        this.checkInitialStatus(statusEl, connectBtn, sessionStatusEl);
+        // 初期ステータスを確認
+        this.checkSessionStatus(sessionStatusEl);
 
         // ─── Playwright Chrome ログイン（推奨）───
-        containerEl.createEl('h3', { text: 'Playwright Chrome でX にログイン（推奨）' });
+        containerEl.createEl('h3', { text: 'Chrome でX にログイン（推奨）' });
 
         const browserDescEl = containerEl.createEl('p', { cls: 'setting-item-description' });
         browserDescEl.style.cssText = 'margin: 0 0 12px; font-size: 13px; color: var(--text-muted);';
         browserDescEl.innerHTML =
-            '✅ <b>この方法が最も確実です。</b><br>' +
             'Chrome ウィンドウが開くので X にログインすると、Cookie が自動取得されます。<br>' +
             'すでにログイン済みの場合は数秒で自動完了します。<br>' +
             '<small>※ DevTools でのコピー不要。初回または Chrome プロファイルをリセットした後に使用。</small>';
@@ -716,11 +559,9 @@ class XPublisherSettingTab extends PluginSettingTab {
                             await this.plugin.xClient.resetSession();
                             browserStatusEl.setText('● プロファイル削除済み。再度「Chrome でログイン」してください');
                             browserStatusEl.style.color = '#f59e0b';
-                            if (sessionStatusEl) {
-                                sessionStatusEl.setText('● 未設定（auth_token を入力してください）');
-                                sessionStatusEl.style.color = 'var(--text-muted)';
-                            }
-                            new Notice('Chrome プロファイルをリセットしました。「Chrome でログイン」から正しいアカウントでログインしてください。', 8000);
+                            sessionStatusEl.setText('● 未設定（auth_token を入力してください）');
+                            sessionStatusEl.style.color = 'var(--text-muted)';
+                            new Notice('Chrome プロファイルをリセットしました。', 8000);
                         } catch (err: any) {
                             new Notice(`リセット失敗: ${err.message}`);
                         } finally {
@@ -729,18 +570,36 @@ class XPublisherSettingTab extends PluginSettingTab {
                     });
             });
 
+        // ─── ログアウト ───
+        new Setting(containerEl)
+            .setName('ログアウト / 連携解除')
+            .setDesc('保存された Cookie を削除します')
+            .addButton(button => {
+                button
+                    .setButtonText('ログアウト')
+                    .setWarning()
+                    .onClick(async () => {
+                        const isServerUp = await this.plugin.xClient.healthCheck();
+                        if (!isServerUp) {
+                            new Notice('サーバーが起動していません。npm run server を実行してください。', 6000);
+                            return;
+                        }
+                        button.setButtonText('ログアウト中...').setDisabled(true);
+                        try {
+                            await this.plugin.xClient.logout();
+                            sessionStatusEl.setText('● 未設定（auth_token を入力してください）');
+                            sessionStatusEl.style.color = 'var(--text-muted)';
+                            new Notice('ログアウトしました。');
+                        } catch (err: any) {
+                            new Notice(`ログアウト失敗: ${err.message}`);
+                        } finally {
+                            button.setButtonText('ログアウト').setDisabled(false);
+                        }
+                    });
+            });
+
         // ─── 動作設定 ───
         containerEl.createEl('h3', { text: '動作設定' });
-
-        new Setting(containerEl)
-            .setName('ヘッドレスモード')
-            .setDesc('記事投稿時にブラウザを非表示で実行（推奨: ON）')
-            .addToggle(toggle => toggle
-                .setValue(this.plugin.settings.headlessMode)
-                .onChange(async (value) => {
-                    this.plugin.settings = { ...this.plugin.settings, headlessMode: value };
-                    await this.plugin.saveSettings();
-                }));
 
         new Setting(containerEl)
             .setName('投稿後に X.com を開く')
@@ -785,7 +644,7 @@ class XPublisherSettingTab extends PluginSettingTab {
                     button.setButtonText('確認中...');
                     button.setDisabled(true);
                     const ok = await this.plugin.xClient.healthCheck();
-                    button.setButtonText(ok ? '接続成功 ✅' : '接続失敗 ❌');
+                    button.setButtonText(ok ? '接続成功' : '接続失敗');
                     setTimeout(() => {
                         button.setButtonText('テスト');
                         button.setDisabled(false);
@@ -793,44 +652,18 @@ class XPublisherSettingTab extends PluginSettingTab {
                 }));
     }
 
-    private async checkInitialStatus(statusEl: HTMLElement, btn: ButtonComponent, sessionStatusEl: HTMLElement): Promise<void> {
+    private async checkSessionStatus(sessionStatusEl: HTMLElement): Promise<void> {
         try {
-            const status = await this.plugin.xClient.getOAuthStatus();
-            this.applyStatusStyle(statusEl, status);
-            this.applySessionStyle(sessionStatusEl, status);
-            if (status.oauthConnected) {
-                btn.setButtonText('再連携');
+            const status = await this.plugin.xClient.getSessionStatus();
+            if (status.sessionReady) {
+                sessionStatusEl.setText('● Cookie 設定済み（投稿可能）');
+                sessionStatusEl.style.color = '#10b981';
+            } else {
+                sessionStatusEl.setText('● 未設定（auth_token を入力してください）');
+                sessionStatusEl.style.color = 'var(--text-muted)';
             }
         } catch {
-            statusEl.setText('● サーバーに接続できません');
-            statusEl.style.color = 'var(--text-muted)';
             sessionStatusEl.setText('● サーバーに接続できません');
-            sessionStatusEl.style.color = 'var(--text-muted)';
-        }
-    }
-
-    private applyStatusStyle(statusEl: HTMLElement, status: OAuthStatus): void {
-        if (status.oauthConnected) {
-            statusEl.setText('● Bearer トークン取得済み');
-            statusEl.style.color = '#10b981';
-        } else if (status.status === 'error' && status.error) {
-            statusEl.setText(`● エラー: ${status.error}`);
-            statusEl.style.color = '#ef4444';
-        } else if (status.status === 'pending') {
-            statusEl.setText('● ブラウザでログイン待機中...');
-            statusEl.style.color = '#f59e0b';
-        } else {
-            statusEl.setText('● 未接続');
-            statusEl.style.color = 'var(--text-muted)';
-        }
-    }
-
-    private applySessionStyle(sessionStatusEl: HTMLElement, status: OAuthStatus): void {
-        if (status.sessionReady) {
-            sessionStatusEl.setText('● Cookie 設定済み ✅（投稿可能）');
-            sessionStatusEl.style.color = '#10b981';
-        } else {
-            sessionStatusEl.setText('● 未設定（auth_token を入力してください）');
             sessionStatusEl.style.color = 'var(--text-muted)';
         }
     }
@@ -847,11 +680,11 @@ class XPublisherSettingTab extends PluginSettingTab {
 
             if (result.status === 'success') {
                 button.setButtonText('Chrome でログイン').setDisabled(false);
-                browserStatusEl.setText('● セッション設定完了 ✅');
+                browserStatusEl.setText('● セッション設定完了');
                 browserStatusEl.style.color = '#10b981';
-                sessionStatusEl.setText('● Cookie 設定済み ✅（投稿可能）');
+                sessionStatusEl.setText('● Cookie 設定済み（投稿可能）');
                 sessionStatusEl.style.color = '#10b981';
-                new Notice('✅ Chrome ログイン完了！投稿できるようになりました。', 6000);
+                new Notice('Chrome ログイン完了！投稿できるようになりました。', 6000);
                 return;
             }
             if (result.status === 'error') {
@@ -865,83 +698,6 @@ class XPublisherSettingTab extends PluginSettingTab {
         button.setButtonText('Chrome でログイン').setDisabled(false);
         browserStatusEl.setText('● タイムアウト');
         browserStatusEl.style.color = '#ef4444';
-    }
-
-    private async startOAuthFlow(button: ButtonComponent, statusEl: HTMLElement): Promise<void> {
-        const { clientId, clientSecret } = this.plugin.settings;
-
-        if (!clientId) {
-            new Notice('Client ID を入力してください');
-            return;
-        }
-
-        const isServerUp = await this.plugin.xClient.healthCheck();
-        if (!isServerUp) {
-            new Notice('サーバーが起動していません。ターミナルで npm run server を実行してください。', 8000);
-            return;
-        }
-
-        button.setButtonText('認証中...').setDisabled(true);
-        statusEl.setText('● ブラウザでログインしてください...');
-        statusEl.style.color = '#f59e0b';
-
-        try {
-            await this.plugin.xClient.startOAuth(clientId, clientSecret || undefined);
-        } catch (err: any) {
-            button.setButtonText('連携する').setDisabled(false);
-            statusEl.setText(`● エラー: ${err.message}`);
-            statusEl.style.color = '#ef4444';
-            return;
-        }
-
-        this.pollingActive = true;
-        await this.pollUntilComplete(button, statusEl);
-    }
-
-    private async pollUntilComplete(button: ButtonComponent, statusEl: HTMLElement): Promise<void> {
-        const MAX_POLLS = 150; // 5 minutes (150 × 2s)
-        let count = 0;
-
-        while (this.pollingActive && count < MAX_POLLS) {
-            await new Promise<void>(resolve => setTimeout(resolve, 2000));
-            if (!this.pollingActive) break;
-            count++;
-
-            const status = await this.plugin.xClient.getOAuthStatus();
-
-            if (status.oauthConnected || status.status === 'success') {
-                this.pollingActive = false;
-                button.setButtonText('再連携').setDisabled(false);
-                statusEl.setText('● Bearer トークン取得済み');
-                statusEl.style.color = '#10b981';
-                if (status.sessionReady) {
-                    new Notice('認証完了！投稿できるようになりました。', 5000);
-                } else {
-                    new Notice(
-                        'OAuth 完了！\n次に「セッション Cookie 設定」へ：\n' +
-                        'ブラウザで x.com を開いて DevTools（F12）→ Application → Cookies → auth_token と ct0 をコピーして貼り付けてください。',
-                        15000
-                    );
-                }
-                return;
-            }
-
-            if (status.status === 'error') {
-                this.pollingActive = false;
-                button.setButtonText('連携する').setDisabled(false);
-                statusEl.setText(`● エラー: ${status.error || '不明なエラー'}`);
-                statusEl.style.color = '#ef4444';
-                return;
-            }
-        }
-
-        // Timeout
-        if (this.pollingActive) {
-            this.pollingActive = false;
-            button.setButtonText('連携する').setDisabled(false);
-            statusEl.setText('● タイムアウト（再試行してください）');
-            statusEl.style.color = '#ef4444';
-        }
     }
 }
 
@@ -998,7 +754,7 @@ export default class XPublisherPlugin extends Plugin {
     onunload() {}
 
     async loadSettings() {
-        this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+        this.settings = { ...DEFAULT_SETTINGS, ...(await this.loadData()) };
     }
 
     async saveSettings() {
@@ -1006,27 +762,29 @@ export default class XPublisherPlugin extends Plugin {
         this.xClient?.setServerUrl(this.settings.serverUrl);
     }
 
-    async publishCurrentFile(file: TFile, skipConfirmation = false) {
-        try {
-            const parsedNote = await parseNote(this.app, file);
+    private async publishCurrentFile(file: TFile, skipConfirm = false) {
+        const isServerUp = await this.xClient.healthCheck();
+        if (!isServerUp) {
+            new Notice('サーバーが起動していません。ターミナルで npm run server を実行してください。', 8000);
+            return;
+        }
 
-            if (skipConfirmation) {
-                await this.doPublish(parsedNote, file);
-            } else {
-                new PublishConfirmModal(
-                    this.app,
-                    parsedNote,
-                    () => this.doPublish(parsedNote, file),
-                    () => {}
-                ).open();
-            }
-        } catch (error: any) {
-            this.handleError(error);
+        const parsedNote = await parseNote(this.app, file);
+
+        if (skipConfirm) {
+            await this.doPublish(file, parsedNote);
+        } else {
+            new PublishConfirmModal(
+                this.app,
+                parsedNote,
+                () => this.doPublish(file, parsedNote),
+                () => {}
+            ).open();
         }
     }
 
-    async doPublish(parsedNote: ParsedNote, file: TFile) {
-        const loadingNotice = new Notice('X Article に投稿中...', 0);
+    private async doPublish(file: TFile, parsedNote: ParsedNote) {
+        const loadingNotice = new Notice(`投稿中: "${parsedNote.title}"...`, 0);
 
         try {
             await updateFrontmatter(this.app, file, { x_status: 'publishing', x_error: '' });
@@ -1040,8 +798,7 @@ export default class XPublisherPlugin extends Plugin {
             const result = await this.xClient.publish({
                 title: parsedNote.title,
                 markdown: parsedNote.body,
-                images: validImages,
-                headless: this.settings.headlessMode
+                images: validImages
             });
 
             loadingNotice.hide();
@@ -1079,29 +836,33 @@ export default class XPublisherPlugin extends Plugin {
         }
     }
 
-    getShortErrorMessage(error: any): string {
-        const message = error.message || String(error);
-        if (message.includes('ECONNREFUSED') || message.includes('fetch')) return 'サーバー接続失敗';
-        if (message.includes('timeout')) return 'タイムアウト';
-        if (message.includes('未連携') || message.includes('cookies')) return '認証エラー';
-        if (message.length > 50) return message.substring(0, 47) + '...';
-        return message;
-    }
+    private getShortErrorMessage(error: any): string {
+        const msg = error?.message || String(error);
 
-    handleError(error: any) {
-        const message = error.message || String(error);
-        let userMessage = 'X Article への投稿に失敗しました';
-
-        if (message.includes('ECONNREFUSED') || message.includes('fetch')) {
-            userMessage = `サーバーに接続できません。ターミナルで npm run server を実行し、プラグイン設定を確認してください。`;
-        } else if (message.includes('未連携') || message.includes('cookies')) {
-            userMessage = 'X アカウントが連携されていません。プラグイン設定から「X アカウントを連携」を実行してください。';
-        } else if (message.includes('timeout')) {
-            userMessage = 'タイムアウトしました。もう一度お試しください。';
-        } else {
-            userMessage = `エラー: ${message}`;
+        if (msg.includes('ECONNREFUSED') || msg.includes('net::ERR')) {
+            return 'サーバー接続エラー';
+        }
+        if (msg.includes('セッション Cookie')) {
+            return 'Cookie未設定';
+        }
+        if (msg.includes('maxFileSizeExceeded')) {
+            return '画像サイズ超過';
         }
 
-        new Notice(userMessage, 10000);
+        return msg.length > 80 ? msg.substring(0, 80) + '...' : msg;
+    }
+
+    private handleError(error: any) {
+        const msg = error?.message || String(error);
+
+        if (msg.includes('ECONNREFUSED') || msg.includes('net::ERR')) {
+            new Notice('サーバーに接続できません。npm run server で起動してください。', 8000);
+        } else if (msg.includes('セッション Cookie')) {
+            new Notice('セッション Cookie が未設定です。設定画面から Cookie を入力してください。', 8000);
+        } else if (msg.includes('maxFileSizeExceeded')) {
+            new Notice('画像が大きすぎます（5MB 制限）。画像を小さくしてください。', 8000);
+        } else {
+            new Notice(`投稿失敗: ${msg}`, 8000);
+        }
     }
 }

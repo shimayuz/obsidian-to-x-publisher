@@ -28,7 +28,6 @@ obsidian-to-x-publisher/
 │   ├── x-api-publisher.js   # メイン: GraphQL API + 画像アップロード + MD変換
 │   └── server.js            # Express サーバー (port 3001)
 ├── scripts/
-│   ├── login.js             # Playwright 認証 → x-cookies.json
 │   └── capture-api.js       # ブラウザ API キャプチャ（調査用）
 ├── plugin/                  # Obsidian プラグイン本体
 └── docs/                    # ← このディレクトリ

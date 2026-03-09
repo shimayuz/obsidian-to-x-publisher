@@ -4,9 +4,7 @@
     "description": "ObsidianのMarkdownをX Articlesに自動転記するツール",
     "main": "src/server.js",
     "scripts": {
-        "login": "node scripts/login.js",
         "server": "node src/server.js",
-        "dev": "node src/x-publisher.js --debug",
         "capture-api": "node scripts/capture-api.js"
     },
     "keywords": [

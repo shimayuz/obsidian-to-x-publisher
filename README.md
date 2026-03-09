@@ -45,12 +45,11 @@ cd obsidian-to-x-publisher
 npm install
 npx playwright install chromium
 
-# Log in to X and save cookies (first time only)
-npm run login
-
 # Start the server (port 3001)
 npm run server
 ```
+
+Set session cookies via the Obsidian plugin settings (manual DevTools entry or Chrome login).
 
 For details, see [docs/setup-and-usage.md](docs/setup-and-usage.md).
 
@@ -85,23 +84,15 @@ src/
   x-api-publisher.js   # GraphQL API + image upload + Markdown conversion
   server.js            # Express server (port 3001)
 scripts/
-  login.js             # First-time login & cookie storage
   capture-api.js       # Browser API capture (for debugging)
 plugin/                # Obsidian plugin source
 docs/                  # Documentation
-  MoC-obsidian-to-x-publisher.md
-  brat-setup.md
-  setup-and-usage.md
-  api-reference.md
-  image-upload-process.md
-  markdown-draftjs-mapping.md
 ```
 
 ## npm Scripts
 
 | Command | Description |
 | ------- | ----------- |
-| `npm run login` | First-time login & cookie storage |
 | `npm run server` | Start the server (port 3001) |
 | `npm run capture-api` | Capture browser API traffic (for debugging) |
 

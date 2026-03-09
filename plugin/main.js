@@ -35,47 +35,32 @@ var import_obsidian = __toModule(require("obsidian"));
 var path = __toModule(require("path"));
 var DEFAULT_SETTINGS = {
   serverUrl: "http://127.0.0.1:3001",
-  clientId: "",
-  clientSecret: "",
-  headlessMode: true,
   openAfterPublish: true,
   showNotification: true
 };
 async function updateFrontmatter(app, file, updates) {
   const content = await app.vault.read(file);
   const frontmatterRegex = /^---\s*\n([\s\S]*?)\n---\s*\n?/;
-  const match = content.match(frontmatterRegex);
   let newContent;
+  const match = content.match(frontmatterRegex);
   if (match) {
-    const frontmatterStr = match[1];
-    const frontmatterLines = frontmatterStr.split("\n");
-    const frontmatterObj = {};
-    for (const line of frontmatterLines) {
-      const colonIndex = line.indexOf(":");
-      if (colonIndex > 0) {
-        const key = line.substring(0, colonIndex).trim();
-        let value = line.substring(colonIndex + 1).trim();
-        if (value.startsWith('"') && value.endsWith('"') || value.startsWith("'") && value.endsWith("'")) {
-          value = value.slice(1, -1);
-        }
-        frontmatterObj[key] = value;
-      }
-    }
+    const existingLines = match[1].split("\n");
+    const existingMap = new Map();
+    existingLines.forEach((line, idx) => {
+      const keyMatch = line.match(/^(\S+):/);
+      if (keyMatch)
+        existingMap.set(keyMatch[1], idx);
+    });
+    const newFrontmatterLines = [...existingLines];
     for (const [key, value] of Object.entries(updates)) {
-      if (value === null || value === void 0) {
-        delete frontmatterObj[key];
+      if (value === null || value === void 0)
+        continue;
+      const formatted = value === "" ? `${key}: ""` : typeof value === "string" && (value.includes(":") || value.includes("#") || value.includes('"')) ? `${key}: "${value.replace(/"/g, '\\"')}"` : `${key}: ${value}`;
+      const existingIdx = existingMap.get(key);
+      if (existingIdx !== void 0) {
+        newFrontmatterLines[existingIdx] = formatted;
       } else {
-        frontmatterObj[key] = value;
-      }
-    }
-    const newFrontmatterLines = [];
-    for (const [key, value] of Object.entries(frontmatterObj)) {
-      if (value === "" || value === null || value === void 0) {
-        newFrontmatterLines.push(`${key}: ""`);
-      } else if (typeof value === "string" && (value.includes(":") || value.includes("#") || value.includes('"'))) {
-        newFrontmatterLines.push(`${key}: "${value.replace(/"/g, '\\"')}"`);
-      } else {
-        newFrontmatterLines.push(`${key}: ${value}`);
+        newFrontmatterLines.push(formatted);
       }
     }
     const newFrontmatter = `---
@@ -130,42 +115,23 @@ var XPublisherClient = class {
       return false;
     }
   }
-  async startOAuth(clientId, clientSecret) {
-    const body = { clientId };
-    if (clientSecret)
-      body.clientSecret = clientSecret;
-    const response = await (0, import_obsidian.requestUrl)({
-      url: `${this.serverUrl}/oauth/start`,
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-      throw: false
-    });
-    if (response.status === 409)
-      return;
-    if (response.status !== 200) {
-      const parsed = JSON.parse(response.text);
-      throw new Error(parsed.error || `HTTP ${response.status}`);
-    }
-  }
-  async getOAuthStatus() {
-    var _a, _b;
+  async getSessionStatus() {
     try {
       const response = await (0, import_obsidian.requestUrl)({
-        url: `${this.serverUrl}/oauth/status`,
+        url: `${this.serverUrl}/health`,
         method: "GET",
         throw: false
       });
       if (response.status !== 200) {
-        return { status: "error", error: "\u30B5\u30FC\u30D0\u30FC\u3092\u518D\u8D77\u52D5\u3057\u3066\u304F\u3060\u3055\u3044\uFF08npm run server\uFF09", authenticated: false };
+        return { sessionReady: false, browserSetupStatus: "error" };
       }
-      const text = (_b = (_a = response.text) == null ? void 0 : _a.trim()) != null ? _b : "";
-      if (!text.startsWith("{")) {
-        return { status: "error", error: "\u30B5\u30FC\u30D0\u30FC\u3092\u518D\u8D77\u52D5\u3057\u3066\u304F\u3060\u3055\u3044\uFF08npm run server\uFF09", authenticated: false };
-      }
-      return JSON.parse(text);
+      const data = JSON.parse(response.text);
+      return {
+        sessionReady: !!data.sessionReady,
+        browserSetupStatus: data.browserSetupStatus || "idle"
+      };
     } catch (e) {
-      return { status: "error", error: "\u30B5\u30FC\u30D0\u30FC\u304C\u8D77\u52D5\u3057\u3066\u3044\u307E\u305B\u3093\uFF08npm run server\uFF09", authenticated: false };
+      return { sessionReady: false, browserSetupStatus: "error" };
     }
   }
   async saveSessionCookies(authToken, csrfToken) {
@@ -244,8 +210,7 @@ var XPublisherClient = class {
       const bodyStr = JSON.stringify({
         title: params.title,
         markdown: params.markdown,
-        images: params.images || [],
-        headless: params.headless !== false
+        images: params.images || []
       });
       const response = await (0, import_obsidian.requestUrl)({
         url: `${this.serverUrl}/publish`,
@@ -364,76 +329,16 @@ var PublishConfirmModal = class extends import_obsidian.Modal {
 var XPublisherSettingTab = class extends import_obsidian.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
-    this.pollingActive = false;
     this.plugin = plugin;
   }
   display() {
-    this.pollingActive = false;
     const { containerEl } = this;
     containerEl.empty();
     containerEl.createEl("h2", { text: "X Article Publisher \u8A2D\u5B9A" });
-    containerEl.createEl("h3", { text: "X Developer App" });
-    const descEl = containerEl.createEl("p", { cls: "setting-item-description" });
-    descEl.style.cssText = "margin: 0 0 12px; font-size: 13px; color: var(--text-muted);";
-    descEl.innerHTML = '<a href="https://developer.x.com" target="_blank">developer.x.com</a> \u3067\u30A2\u30D7\u30EA\u3092\u4F5C\u6210\u3057\u3001OAuth 2.0 \u3092\u6709\u52B9\u5316\u3002Callback URI \u306B <code>http://127.0.0.1:3001/oauth/callback</code> \u3092\u767B\u9332\u3057\u3066\u304F\u3060\u3055\u3044\u3002';
-    new import_obsidian.Setting(containerEl).setName("Client ID").setDesc("X Developer Portal \u2192 Keys and tokens \u2192 Client ID").addText((text) => text.setPlaceholder("\u4F8B: xxxxxxxxxxxxxxxxxxxx").setValue(this.plugin.settings.clientId).onChange(async (value) => {
-      this.plugin.settings = { ...this.plugin.settings, clientId: value };
-      await this.plugin.saveSettings();
-    }));
-    let secretInputEl;
-    new import_obsidian.Setting(containerEl).setName("Client Secret").setDesc("Confidential Client \u306E\u5834\u5408\u306E\u307F\u5165\u529B\uFF08Public Client \u306F\u7A7A\u6B04\u3067 OK\uFF09").addText((text) => {
-      text.inputEl.type = "password";
-      secretInputEl = text.inputEl;
-      text.setPlaceholder("Client Secret\uFF08\u4EFB\u610F\uFF09").setValue(this.plugin.settings.clientSecret).onChange(async (value) => {
-        this.plugin.settings = { ...this.plugin.settings, clientSecret: value };
-        await this.plugin.saveSettings();
-      });
-    }).addExtraButton((button) => {
-      button.setIcon("eye").setTooltip("\u8868\u793A/\u975E\u8868\u793A").onClick(() => {
-        const hidden = secretInputEl.type === "password";
-        secretInputEl.type = hidden ? "text" : "password";
-        button.setIcon(hidden ? "eye-off" : "eye");
-      });
-    });
-    containerEl.createEl("h3", { text: "X \u30A2\u30AB\u30A6\u30F3\u30C8\u9023\u643A" });
-    const statusEl = containerEl.createDiv();
-    statusEl.style.cssText = "padding: 4px 0 12px; font-size: 13px;";
-    statusEl.setText("\u25CF \u63A5\u7D9A\u72B6\u614B\u3092\u78BA\u8A8D\u4E2D...");
-    let connectBtn;
-    let sessionStatusEl;
-    new import_obsidian.Setting(containerEl).setName("X \u30A2\u30AB\u30A6\u30F3\u30C8\u3092\u9023\u643A").setDesc("\u30AF\u30EA\u30C3\u30AF\u3059\u308B\u3068\u30D6\u30E9\u30A6\u30B6\u304C\u8D77\u52D5\u3057\u3001X \u306E\u30ED\u30B0\u30A4\u30F3\u753B\u9762\u304C\u8868\u793A\u3055\u308C\u307E\u3059").addButton((button) => {
-      connectBtn = button;
-      button.setButtonText("\u9023\u643A\u3059\u308B").setCta().onClick(() => this.startOAuthFlow(connectBtn, statusEl));
-    });
-    new import_obsidian.Setting(containerEl).setName("\u30ED\u30B0\u30A2\u30A6\u30C8 / \u9023\u643A\u89E3\u9664").setDesc("X \u3068\u306E\u9023\u643A\u3092\u89E3\u9664\u3057\u3001\u4FDD\u5B58\u3055\u308C\u305F Cookie\u30FBChrome \u30D7\u30ED\u30D5\u30A1\u30A4\u30EB\u3092\u3059\u3079\u3066\u524A\u9664\u3057\u307E\u3059").addButton((button) => {
-      button.setButtonText("\u30ED\u30B0\u30A2\u30A6\u30C8").setWarning().onClick(async () => {
-        const isServerUp = await this.plugin.xClient.healthCheck();
-        if (!isServerUp) {
-          new import_obsidian.Notice("\u30B5\u30FC\u30D0\u30FC\u304C\u8D77\u52D5\u3057\u3066\u3044\u307E\u305B\u3093\u3002npm run server \u3092\u5B9F\u884C\u3057\u3066\u304F\u3060\u3055\u3044\u3002", 6e3);
-          return;
-        }
-        button.setButtonText("\u30ED\u30B0\u30A2\u30A6\u30C8\u4E2D...").setDisabled(true);
-        try {
-          await this.plugin.xClient.logout();
-          statusEl.setText("\u25CF \u672A\u63A5\u7D9A");
-          statusEl.style.color = "var(--text-muted)";
-          if (sessionStatusEl) {
-            sessionStatusEl.setText("\u25CF \u672A\u8A2D\u5B9A\uFF08auth_token \u3092\u5165\u529B\u3057\u3066\u304F\u3060\u3055\u3044\uFF09");
-            sessionStatusEl.style.color = "var(--text-muted)";
-          }
-          connectBtn.setButtonText("\u9023\u643A\u3059\u308B").setDisabled(false);
-          new import_obsidian.Notice("\u30ED\u30B0\u30A2\u30A6\u30C8\u3057\u307E\u3057\u305F\u3002\u518D\u5EA6\u300C\u9023\u643A\u3059\u308B\u300D\u304B\u3089\u8A8D\u8A3C\u3057\u3066\u304F\u3060\u3055\u3044\u3002", 6e3);
-        } catch (err) {
-          new import_obsidian.Notice(`\u30ED\u30B0\u30A2\u30A6\u30C8\u5931\u6557: ${err.message}`);
-        } finally {
-          button.setButtonText("\u30ED\u30B0\u30A2\u30A6\u30C8").setDisabled(false);
-        }
-      });
-    });
     containerEl.createEl("h3", { text: "\u30BB\u30C3\u30B7\u30E7\u30F3 Cookie \u8A2D\u5B9A" });
     const cookieDescEl = containerEl.createEl("p", { cls: "setting-item-description" });
     cookieDescEl.style.cssText = "margin: 0 0 12px; font-size: 13px; color: var(--text-muted);";
-    cookieDescEl.innerHTML = '\u26A0\uFE0F <b>OAuth \u8A8D\u8A3C\u5F8C\u306B\u8A2D\u5B9A\u304C\u5FC5\u8981\u3067\u3059\uFF08\u4E00\u5EA6\u3060\u3051\uFF09</b><br><br><b>\u624B\u9806\uFF1A</b> <a href="https://x.com" target="_blank">x.com</a> \u306B\u30ED\u30B0\u30A4\u30F3\u3057\u3066\u3044\u308B\u30D6\u30E9\u30A6\u30B6\u3067<br>\u958B\u767A\u8005\u30C4\u30FC\u30EB\uFF08Mac: <code>Cmd+Option+I</code> / Win: <code>F12</code>\uFF09\u3092\u958B\u304D\u3001<br><b>Application</b> \u30BF\u30D6 \u2192 <b>Cookies</b> \u2192 <b>https://x.com</b> \u3092\u9078\u629E\u3057\u3001<br><code>auth_token</code> \u3068 <code>ct0</code> \u306E Value \u3092\u30B3\u30D4\u30FC\u3057\u3066\u8CBC\u308A\u4ED8\u3051\u3066\u304F\u3060\u3055\u3044\u3002<br><small>\u203B auth_token \u306F httpOnly \u306A\u306E\u3067 JavaScript \u3067\u306F\u53D6\u5F97\u3067\u304D\u307E\u305B\u3093\uFF08DevTools \u5FC5\u9808\uFF09</small>';
+    cookieDescEl.innerHTML = '<b>\u624B\u9806\uFF1A</b> <a href="https://x.com" target="_blank">x.com</a> \u306B\u30ED\u30B0\u30A4\u30F3\u3057\u3066\u3044\u308B\u30D6\u30E9\u30A6\u30B6\u3067<br>\u958B\u767A\u8005\u30C4\u30FC\u30EB\uFF08Mac: <code>Cmd+Option+I</code> / Win: <code>F12</code>\uFF09\u3092\u958B\u304D\u3001<br><b>Application</b> \u30BF\u30D6 \u2192 <b>Cookies</b> \u2192 <b>https://x.com</b> \u3092\u9078\u629E\u3057\u3001<br><code>auth_token</code> \u3068 <code>ct0</code> \u306E Value \u3092\u30B3\u30D4\u30FC\u3057\u3066\u8CBC\u308A\u4ED8\u3051\u3066\u304F\u3060\u3055\u3044\u3002<br><small>\u203B auth_token \u306F httpOnly \u306A\u306E\u3067 JavaScript \u3067\u306F\u53D6\u5F97\u3067\u304D\u307E\u305B\u3093\uFF08DevTools \u5FC5\u9808\uFF09</small>';
     let authTokenInputEl;
     new import_obsidian.Setting(containerEl).setName("auth_token").setDesc("X \u306E\u30BB\u30C3\u30B7\u30E7\u30F3\u8A8D\u8A3C\u30C8\u30FC\u30AF\u30F3\uFF08\u5FC5\u9808\uFF09").addText((text) => {
       text.inputEl.type = "password";
@@ -458,7 +363,7 @@ var XPublisherSettingTab = class extends import_obsidian.PluginSettingTab {
         button.setIcon(hidden ? "eye-off" : "eye");
       });
     });
-    sessionStatusEl = containerEl.createDiv();
+    const sessionStatusEl = containerEl.createDiv();
     sessionStatusEl.style.cssText = "padding: 4px 0 12px; font-size: 13px;";
     sessionStatusEl.setText("\u25CF \u72B6\u614B\u3092\u78BA\u8A8D\u4E2D...");
     new import_obsidian.Setting(containerEl).setName("Cookie \u3092\u4FDD\u5B58").setDesc("\u5165\u529B\u3057\u305F Cookie \u3092\u30B5\u30FC\u30D0\u30FC\u306B\u9001\u4FE1\u3057\u307E\u3059").addButton((button) => {
@@ -472,7 +377,7 @@ var XPublisherSettingTab = class extends import_obsidian.PluginSettingTab {
         button.setButtonText("\u4FDD\u5B58\u4E2D...").setDisabled(true);
         try {
           await this.plugin.xClient.saveSessionCookies(authToken, ct0 || void 0);
-          sessionStatusEl.setText("\u25CF Cookie \u8A2D\u5B9A\u6E08\u307F \u2705\uFF08\u6295\u7A3F\u53EF\u80FD\uFF09");
+          sessionStatusEl.setText("\u25CF Cookie \u8A2D\u5B9A\u6E08\u307F\uFF08\u6295\u7A3F\u53EF\u80FD\uFF09");
           sessionStatusEl.style.color = "#10b981";
           authTokenInputEl.value = "";
           ct0InputEl.value = "";
@@ -486,11 +391,11 @@ var XPublisherSettingTab = class extends import_obsidian.PluginSettingTab {
         }
       });
     });
-    this.checkInitialStatus(statusEl, connectBtn, sessionStatusEl);
-    containerEl.createEl("h3", { text: "Playwright Chrome \u3067X \u306B\u30ED\u30B0\u30A4\u30F3\uFF08\u63A8\u5968\uFF09" });
+    this.checkSessionStatus(sessionStatusEl);
+    containerEl.createEl("h3", { text: "Chrome \u3067X \u306B\u30ED\u30B0\u30A4\u30F3\uFF08\u63A8\u5968\uFF09" });
     const browserDescEl = containerEl.createEl("p", { cls: "setting-item-description" });
     browserDescEl.style.cssText = "margin: 0 0 12px; font-size: 13px; color: var(--text-muted);";
-    browserDescEl.innerHTML = "\u2705 <b>\u3053\u306E\u65B9\u6CD5\u304C\u6700\u3082\u78BA\u5B9F\u3067\u3059\u3002</b><br>Chrome \u30A6\u30A3\u30F3\u30C9\u30A6\u304C\u958B\u304F\u306E\u3067 X \u306B\u30ED\u30B0\u30A4\u30F3\u3059\u308B\u3068\u3001Cookie \u304C\u81EA\u52D5\u53D6\u5F97\u3055\u308C\u307E\u3059\u3002<br>\u3059\u3067\u306B\u30ED\u30B0\u30A4\u30F3\u6E08\u307F\u306E\u5834\u5408\u306F\u6570\u79D2\u3067\u81EA\u52D5\u5B8C\u4E86\u3057\u307E\u3059\u3002<br><small>\u203B DevTools \u3067\u306E\u30B3\u30D4\u30FC\u4E0D\u8981\u3002\u521D\u56DE\u307E\u305F\u306F Chrome \u30D7\u30ED\u30D5\u30A1\u30A4\u30EB\u3092\u30EA\u30BB\u30C3\u30C8\u3057\u305F\u5F8C\u306B\u4F7F\u7528\u3002</small>";
+    browserDescEl.innerHTML = "Chrome \u30A6\u30A3\u30F3\u30C9\u30A6\u304C\u958B\u304F\u306E\u3067 X \u306B\u30ED\u30B0\u30A4\u30F3\u3059\u308B\u3068\u3001Cookie \u304C\u81EA\u52D5\u53D6\u5F97\u3055\u308C\u307E\u3059\u3002<br>\u3059\u3067\u306B\u30ED\u30B0\u30A4\u30F3\u6E08\u307F\u306E\u5834\u5408\u306F\u6570\u79D2\u3067\u81EA\u52D5\u5B8C\u4E86\u3057\u307E\u3059\u3002<br><small>\u203B DevTools \u3067\u306E\u30B3\u30D4\u30FC\u4E0D\u8981\u3002\u521D\u56DE\u307E\u305F\u306F Chrome \u30D7\u30ED\u30D5\u30A1\u30A4\u30EB\u3092\u30EA\u30BB\u30C3\u30C8\u3057\u305F\u5F8C\u306B\u4F7F\u7528\u3002</small>";
     const browserStatusEl = containerEl.createDiv();
     browserStatusEl.style.cssText = "padding: 4px 0 12px; font-size: 13px;";
     browserStatusEl.setText("\u25CF \u5F85\u6A5F\u4E2D");
@@ -528,11 +433,9 @@ var XPublisherSettingTab = class extends import_obsidian.PluginSettingTab {
           await this.plugin.xClient.resetSession();
           browserStatusEl.setText("\u25CF \u30D7\u30ED\u30D5\u30A1\u30A4\u30EB\u524A\u9664\u6E08\u307F\u3002\u518D\u5EA6\u300CChrome \u3067\u30ED\u30B0\u30A4\u30F3\u300D\u3057\u3066\u304F\u3060\u3055\u3044");
           browserStatusEl.style.color = "#f59e0b";
-          if (sessionStatusEl) {
-            sessionStatusEl.setText("\u25CF \u672A\u8A2D\u5B9A\uFF08auth_token \u3092\u5165\u529B\u3057\u3066\u304F\u3060\u3055\u3044\uFF09");
-            sessionStatusEl.style.color = "var(--text-muted)";
-          }
-          new import_obsidian.Notice("Chrome \u30D7\u30ED\u30D5\u30A1\u30A4\u30EB\u3092\u30EA\u30BB\u30C3\u30C8\u3057\u307E\u3057\u305F\u3002\u300CChrome \u3067\u30ED\u30B0\u30A4\u30F3\u300D\u304B\u3089\u6B63\u3057\u3044\u30A2\u30AB\u30A6\u30F3\u30C8\u3067\u30ED\u30B0\u30A4\u30F3\u3057\u3066\u304F\u3060\u3055\u3044\u3002", 8e3);
+          sessionStatusEl.setText("\u25CF \u672A\u8A2D\u5B9A\uFF08auth_token \u3092\u5165\u529B\u3057\u3066\u304F\u3060\u3055\u3044\uFF09");
+          sessionStatusEl.style.color = "var(--text-muted)";
+          new import_obsidian.Notice("Chrome \u30D7\u30ED\u30D5\u30A1\u30A4\u30EB\u3092\u30EA\u30BB\u30C3\u30C8\u3057\u307E\u3057\u305F\u3002", 8e3);
         } catch (err) {
           new import_obsidian.Notice(`\u30EA\u30BB\u30C3\u30C8\u5931\u6557: ${err.message}`);
         } finally {
@@ -540,11 +443,27 @@ var XPublisherSettingTab = class extends import_obsidian.PluginSettingTab {
         }
       });
     });
+    new import_obsidian.Setting(containerEl).setName("\u30ED\u30B0\u30A2\u30A6\u30C8 / \u9023\u643A\u89E3\u9664").setDesc("\u4FDD\u5B58\u3055\u308C\u305F Cookie \u3092\u524A\u9664\u3057\u307E\u3059").addButton((button) => {
+      button.setButtonText("\u30ED\u30B0\u30A2\u30A6\u30C8").setWarning().onClick(async () => {
+        const isServerUp = await this.plugin.xClient.healthCheck();
+        if (!isServerUp) {
+          new import_obsidian.Notice("\u30B5\u30FC\u30D0\u30FC\u304C\u8D77\u52D5\u3057\u3066\u3044\u307E\u305B\u3093\u3002npm run server \u3092\u5B9F\u884C\u3057\u3066\u304F\u3060\u3055\u3044\u3002", 6e3);
+          return;
+        }
+        button.setButtonText("\u30ED\u30B0\u30A2\u30A6\u30C8\u4E2D...").setDisabled(true);
+        try {
+          await this.plugin.xClient.logout();
+          sessionStatusEl.setText("\u25CF \u672A\u8A2D\u5B9A\uFF08auth_token \u3092\u5165\u529B\u3057\u3066\u304F\u3060\u3055\u3044\uFF09");
+          sessionStatusEl.style.color = "var(--text-muted)";
+          new import_obsidian.Notice("\u30ED\u30B0\u30A2\u30A6\u30C8\u3057\u307E\u3057\u305F\u3002");
+        } catch (err) {
+          new import_obsidian.Notice(`\u30ED\u30B0\u30A2\u30A6\u30C8\u5931\u6557: ${err.message}`);
+        } finally {
+          button.setButtonText("\u30ED\u30B0\u30A2\u30A6\u30C8").setDisabled(false);
+        }
+      });
+    });
     containerEl.createEl("h3", { text: "\u52D5\u4F5C\u8A2D\u5B9A" });
-    new import_obsidian.Setting(containerEl).setName("\u30D8\u30C3\u30C9\u30EC\u30B9\u30E2\u30FC\u30C9").setDesc("\u8A18\u4E8B\u6295\u7A3F\u6642\u306B\u30D6\u30E9\u30A6\u30B6\u3092\u975E\u8868\u793A\u3067\u5B9F\u884C\uFF08\u63A8\u5968: ON\uFF09").addToggle((toggle) => toggle.setValue(this.plugin.settings.headlessMode).onChange(async (value) => {
-      this.plugin.settings = { ...this.plugin.settings, headlessMode: value };
-      await this.plugin.saveSettings();
-    }));
     new import_obsidian.Setting(containerEl).setName("\u6295\u7A3F\u5F8C\u306B X.com \u3092\u958B\u304F").setDesc("\u6295\u7A3F\u5F8C\u306B\u30D6\u30E9\u30A6\u30B6\u3067 X Articles \u3092\u958B\u304F").addToggle((toggle) => toggle.setValue(this.plugin.settings.openAfterPublish).onChange(async (value) => {
       this.plugin.settings = { ...this.plugin.settings, openAfterPublish: value };
       await this.plugin.saveSettings();
@@ -562,49 +481,25 @@ var XPublisherSettingTab = class extends import_obsidian.PluginSettingTab {
       button.setButtonText("\u78BA\u8A8D\u4E2D...");
       button.setDisabled(true);
       const ok = await this.plugin.xClient.healthCheck();
-      button.setButtonText(ok ? "\u63A5\u7D9A\u6210\u529F \u2705" : "\u63A5\u7D9A\u5931\u6557 \u274C");
+      button.setButtonText(ok ? "\u63A5\u7D9A\u6210\u529F" : "\u63A5\u7D9A\u5931\u6557");
       setTimeout(() => {
         button.setButtonText("\u30C6\u30B9\u30C8");
         button.setDisabled(false);
       }, 2e3);
     }));
   }
-  async checkInitialStatus(statusEl, btn, sessionStatusEl) {
+  async checkSessionStatus(sessionStatusEl) {
     try {
-      const status = await this.plugin.xClient.getOAuthStatus();
-      this.applyStatusStyle(statusEl, status);
-      this.applySessionStyle(sessionStatusEl, status);
-      if (status.oauthConnected) {
-        btn.setButtonText("\u518D\u9023\u643A");
+      const status = await this.plugin.xClient.getSessionStatus();
+      if (status.sessionReady) {
+        sessionStatusEl.setText("\u25CF Cookie \u8A2D\u5B9A\u6E08\u307F\uFF08\u6295\u7A3F\u53EF\u80FD\uFF09");
+        sessionStatusEl.style.color = "#10b981";
+      } else {
+        sessionStatusEl.setText("\u25CF \u672A\u8A2D\u5B9A\uFF08auth_token \u3092\u5165\u529B\u3057\u3066\u304F\u3060\u3055\u3044\uFF09");
+        sessionStatusEl.style.color = "var(--text-muted)";
       }
     } catch (e) {
-      statusEl.setText("\u25CF \u30B5\u30FC\u30D0\u30FC\u306B\u63A5\u7D9A\u3067\u304D\u307E\u305B\u3093");
-      statusEl.style.color = "var(--text-muted)";
       sessionStatusEl.setText("\u25CF \u30B5\u30FC\u30D0\u30FC\u306B\u63A5\u7D9A\u3067\u304D\u307E\u305B\u3093");
-      sessionStatusEl.style.color = "var(--text-muted)";
-    }
-  }
-  applyStatusStyle(statusEl, status) {
-    if (status.oauthConnected) {
-      statusEl.setText("\u25CF Bearer \u30C8\u30FC\u30AF\u30F3\u53D6\u5F97\u6E08\u307F");
-      statusEl.style.color = "#10b981";
-    } else if (status.status === "error" && status.error) {
-      statusEl.setText(`\u25CF \u30A8\u30E9\u30FC: ${status.error}`);
-      statusEl.style.color = "#ef4444";
-    } else if (status.status === "pending") {
-      statusEl.setText("\u25CF \u30D6\u30E9\u30A6\u30B6\u3067\u30ED\u30B0\u30A4\u30F3\u5F85\u6A5F\u4E2D...");
-      statusEl.style.color = "#f59e0b";
-    } else {
-      statusEl.setText("\u25CF \u672A\u63A5\u7D9A");
-      statusEl.style.color = "var(--text-muted)";
-    }
-  }
-  applySessionStyle(sessionStatusEl, status) {
-    if (status.sessionReady) {
-      sessionStatusEl.setText("\u25CF Cookie \u8A2D\u5B9A\u6E08\u307F \u2705\uFF08\u6295\u7A3F\u53EF\u80FD\uFF09");
-      sessionStatusEl.style.color = "#10b981";
-    } else {
-      sessionStatusEl.setText("\u25CF \u672A\u8A2D\u5B9A\uFF08auth_token \u3092\u5165\u529B\u3057\u3066\u304F\u3060\u3055\u3044\uFF09");
       sessionStatusEl.style.color = "var(--text-muted)";
     }
   }
@@ -615,11 +510,11 @@ var XPublisherSettingTab = class extends import_obsidian.PluginSettingTab {
       const result = await this.plugin.xClient.getBrowserSetupStatus();
       if (result.status === "success") {
         button.setButtonText("Chrome \u3067\u30ED\u30B0\u30A4\u30F3").setDisabled(false);
-        browserStatusEl.setText("\u25CF \u30BB\u30C3\u30B7\u30E7\u30F3\u8A2D\u5B9A\u5B8C\u4E86 \u2705");
+        browserStatusEl.setText("\u25CF \u30BB\u30C3\u30B7\u30E7\u30F3\u8A2D\u5B9A\u5B8C\u4E86");
         browserStatusEl.style.color = "#10b981";
-        sessionStatusEl.setText("\u25CF Cookie \u8A2D\u5B9A\u6E08\u307F \u2705\uFF08\u6295\u7A3F\u53EF\u80FD\uFF09");
+        sessionStatusEl.setText("\u25CF Cookie \u8A2D\u5B9A\u6E08\u307F\uFF08\u6295\u7A3F\u53EF\u80FD\uFF09");
         sessionStatusEl.style.color = "#10b981";
-        new import_obsidian.Notice("\u2705 Chrome \u30ED\u30B0\u30A4\u30F3\u5B8C\u4E86\uFF01\u6295\u7A3F\u3067\u304D\u308B\u3088\u3046\u306B\u306A\u308A\u307E\u3057\u305F\u3002", 6e3);
+        new import_obsidian.Notice("Chrome \u30ED\u30B0\u30A4\u30F3\u5B8C\u4E86\uFF01\u6295\u7A3F\u3067\u304D\u308B\u3088\u3046\u306B\u306A\u308A\u307E\u3057\u305F\u3002", 6e3);
         return;
       }
       if (result.status === "error") {
@@ -633,67 +528,6 @@ var XPublisherSettingTab = class extends import_obsidian.PluginSettingTab {
     button.setButtonText("Chrome \u3067\u30ED\u30B0\u30A4\u30F3").setDisabled(false);
     browserStatusEl.setText("\u25CF \u30BF\u30A4\u30E0\u30A2\u30A6\u30C8");
     browserStatusEl.style.color = "#ef4444";
-  }
-  async startOAuthFlow(button, statusEl) {
-    const { clientId, clientSecret } = this.plugin.settings;
-    if (!clientId) {
-      new import_obsidian.Notice("Client ID \u3092\u5165\u529B\u3057\u3066\u304F\u3060\u3055\u3044");
-      return;
-    }
-    const isServerUp = await this.plugin.xClient.healthCheck();
-    if (!isServerUp) {
-      new import_obsidian.Notice("\u30B5\u30FC\u30D0\u30FC\u304C\u8D77\u52D5\u3057\u3066\u3044\u307E\u305B\u3093\u3002\u30BF\u30FC\u30DF\u30CA\u30EB\u3067 npm run server \u3092\u5B9F\u884C\u3057\u3066\u304F\u3060\u3055\u3044\u3002", 8e3);
-      return;
-    }
-    button.setButtonText("\u8A8D\u8A3C\u4E2D...").setDisabled(true);
-    statusEl.setText("\u25CF \u30D6\u30E9\u30A6\u30B6\u3067\u30ED\u30B0\u30A4\u30F3\u3057\u3066\u304F\u3060\u3055\u3044...");
-    statusEl.style.color = "#f59e0b";
-    try {
-      await this.plugin.xClient.startOAuth(clientId, clientSecret || void 0);
-    } catch (err) {
-      button.setButtonText("\u9023\u643A\u3059\u308B").setDisabled(false);
-      statusEl.setText(`\u25CF \u30A8\u30E9\u30FC: ${err.message}`);
-      statusEl.style.color = "#ef4444";
-      return;
-    }
-    this.pollingActive = true;
-    await this.pollUntilComplete(button, statusEl);
-  }
-  async pollUntilComplete(button, statusEl) {
-    const MAX_POLLS = 150;
-    let count = 0;
-    while (this.pollingActive && count < MAX_POLLS) {
-      await new Promise((resolve) => setTimeout(resolve, 2e3));
-      if (!this.pollingActive)
-        break;
-      count++;
-      const status = await this.plugin.xClient.getOAuthStatus();
-      if (status.oauthConnected || status.status === "success") {
-        this.pollingActive = false;
-        button.setButtonText("\u518D\u9023\u643A").setDisabled(false);
-        statusEl.setText("\u25CF Bearer \u30C8\u30FC\u30AF\u30F3\u53D6\u5F97\u6E08\u307F");
-        statusEl.style.color = "#10b981";
-        if (status.sessionReady) {
-          new import_obsidian.Notice("\u8A8D\u8A3C\u5B8C\u4E86\uFF01\u6295\u7A3F\u3067\u304D\u308B\u3088\u3046\u306B\u306A\u308A\u307E\u3057\u305F\u3002", 5e3);
-        } else {
-          new import_obsidian.Notice("OAuth \u5B8C\u4E86\uFF01\n\u6B21\u306B\u300C\u30BB\u30C3\u30B7\u30E7\u30F3 Cookie \u8A2D\u5B9A\u300D\u3078\uFF1A\n\u30D6\u30E9\u30A6\u30B6\u3067 x.com \u3092\u958B\u3044\u3066 DevTools\uFF08F12\uFF09\u2192 Application \u2192 Cookies \u2192 auth_token \u3068 ct0 \u3092\u30B3\u30D4\u30FC\u3057\u3066\u8CBC\u308A\u4ED8\u3051\u3066\u304F\u3060\u3055\u3044\u3002", 15e3);
-        }
-        return;
-      }
-      if (status.status === "error") {
-        this.pollingActive = false;
-        button.setButtonText("\u9023\u643A\u3059\u308B").setDisabled(false);
-        statusEl.setText(`\u25CF \u30A8\u30E9\u30FC: ${status.error || "\u4E0D\u660E\u306A\u30A8\u30E9\u30FC"}`);
-        statusEl.style.color = "#ef4444";
-        return;
-      }
-    }
-    if (this.pollingActive) {
-      this.pollingActive = false;
-      button.setButtonText("\u9023\u643A\u3059\u308B").setDisabled(false);
-      statusEl.setText("\u25CF \u30BF\u30A4\u30E0\u30A2\u30A6\u30C8\uFF08\u518D\u8A66\u884C\u3057\u3066\u304F\u3060\u3055\u3044\uFF09");
-      statusEl.style.color = "#ef4444";
-    }
   }
 };
 var XPublisherPlugin = class extends import_obsidian.Plugin {
@@ -739,29 +573,30 @@ var XPublisherPlugin = class extends import_obsidian.Plugin {
   onunload() {
   }
   async loadSettings() {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    this.settings = { ...DEFAULT_SETTINGS, ...await this.loadData() };
   }
   async saveSettings() {
     var _a;
     await this.saveData(this.settings);
     (_a = this.xClient) == null ? void 0 : _a.setServerUrl(this.settings.serverUrl);
   }
-  async publishCurrentFile(file, skipConfirmation = false) {
-    try {
-      const parsedNote = await parseNote(this.app, file);
-      if (skipConfirmation) {
-        await this.doPublish(parsedNote, file);
-      } else {
-        new PublishConfirmModal(this.app, parsedNote, () => this.doPublish(parsedNote, file), () => {
-        }).open();
-      }
-    } catch (error) {
-      this.handleError(error);
+  async publishCurrentFile(file, skipConfirm = false) {
+    const isServerUp = await this.xClient.healthCheck();
+    if (!isServerUp) {
+      new import_obsidian.Notice("\u30B5\u30FC\u30D0\u30FC\u304C\u8D77\u52D5\u3057\u3066\u3044\u307E\u305B\u3093\u3002\u30BF\u30FC\u30DF\u30CA\u30EB\u3067 npm run server \u3092\u5B9F\u884C\u3057\u3066\u304F\u3060\u3055\u3044\u3002", 8e3);
+      return;
+    }
+    const parsedNote = await parseNote(this.app, file);
+    if (skipConfirm) {
+      await this.doPublish(file, parsedNote);
+    } else {
+      new PublishConfirmModal(this.app, parsedNote, () => this.doPublish(file, parsedNote), () => {
+      }).open();
     }
   }
-  async doPublish(parsedNote, file) {
+  async doPublish(file, parsedNote) {
     var _a;
-    const loadingNotice = new import_obsidian.Notice("X Article \u306B\u6295\u7A3F\u4E2D...", 0);
+    const loadingNotice = new import_obsidian.Notice(`\u6295\u7A3F\u4E2D: "${parsedNote.title}"...`, 0);
     try {
       await updateFrontmatter(this.app, file, { x_status: "publishing", x_error: "" });
     } catch (e) {
@@ -771,8 +606,7 @@ var XPublisherPlugin = class extends import_obsidian.Plugin {
       const result = await this.xClient.publish({
         title: parsedNote.title,
         markdown: parsedNote.body,
-        images: validImages,
-        headless: this.settings.headlessMode
+        images: validImages
       });
       loadingNotice.hide();
       if (result.success) {
@@ -809,29 +643,28 @@ var XPublisherPlugin = class extends import_obsidian.Plugin {
     }
   }
   getShortErrorMessage(error) {
-    const message = error.message || String(error);
-    if (message.includes("ECONNREFUSED") || message.includes("fetch"))
-      return "\u30B5\u30FC\u30D0\u30FC\u63A5\u7D9A\u5931\u6557";
-    if (message.includes("timeout"))
-      return "\u30BF\u30A4\u30E0\u30A2\u30A6\u30C8";
-    if (message.includes("\u672A\u9023\u643A") || message.includes("cookies"))
-      return "\u8A8D\u8A3C\u30A8\u30E9\u30FC";
-    if (message.length > 50)
-      return message.substring(0, 47) + "...";
-    return message;
+    const msg = (error == null ? void 0 : error.message) || String(error);
+    if (msg.includes("ECONNREFUSED") || msg.includes("net::ERR")) {
+      return "\u30B5\u30FC\u30D0\u30FC\u63A5\u7D9A\u30A8\u30E9\u30FC";
+    }
+    if (msg.includes("\u30BB\u30C3\u30B7\u30E7\u30F3 Cookie")) {
+      return "Cookie\u672A\u8A2D\u5B9A";
+    }
+    if (msg.includes("maxFileSizeExceeded")) {
+      return "\u753B\u50CF\u30B5\u30A4\u30BA\u8D85\u904E";
+    }
+    return msg.length > 80 ? msg.substring(0, 80) + "..." : msg;
   }
   handleError(error) {
-    const message = error.message || String(error);
-    let userMessage = "X Article \u3078\u306E\u6295\u7A3F\u306B\u5931\u6557\u3057\u307E\u3057\u305F";
-    if (message.includes("ECONNREFUSED") || message.includes("fetch")) {
-      userMessage = `\u30B5\u30FC\u30D0\u30FC\u306B\u63A5\u7D9A\u3067\u304D\u307E\u305B\u3093\u3002\u30BF\u30FC\u30DF\u30CA\u30EB\u3067 npm run server \u3092\u5B9F\u884C\u3057\u3001\u30D7\u30E9\u30B0\u30A4\u30F3\u8A2D\u5B9A\u3092\u78BA\u8A8D\u3057\u3066\u304F\u3060\u3055\u3044\u3002`;
-    } else if (message.includes("\u672A\u9023\u643A") || message.includes("cookies")) {
-      userMessage = "X \u30A2\u30AB\u30A6\u30F3\u30C8\u304C\u9023\u643A\u3055\u308C\u3066\u3044\u307E\u305B\u3093\u3002\u30D7\u30E9\u30B0\u30A4\u30F3\u8A2D\u5B9A\u304B\u3089\u300CX \u30A2\u30AB\u30A6\u30F3\u30C8\u3092\u9023\u643A\u300D\u3092\u5B9F\u884C\u3057\u3066\u304F\u3060\u3055\u3044\u3002";
-    } else if (message.includes("timeout")) {
-      userMessage = "\u30BF\u30A4\u30E0\u30A2\u30A6\u30C8\u3057\u307E\u3057\u305F\u3002\u3082\u3046\u4E00\u5EA6\u304A\u8A66\u3057\u304F\u3060\u3055\u3044\u3002";
+    const msg = (error == null ? void 0 : error.message) || String(error);
+    if (msg.includes("ECONNREFUSED") || msg.includes("net::ERR")) {
+      new import_obsidian.Notice("\u30B5\u30FC\u30D0\u30FC\u306B\u63A5\u7D9A\u3067\u304D\u307E\u305B\u3093\u3002npm run server \u3067\u8D77\u52D5\u3057\u3066\u304F\u3060\u3055\u3044\u3002", 8e3);
+    } else if (msg.includes("\u30BB\u30C3\u30B7\u30E7\u30F3 Cookie")) {
+      new import_obsidian.Notice("\u30BB\u30C3\u30B7\u30E7\u30F3 Cookie \u304C\u672A\u8A2D\u5B9A\u3067\u3059\u3002\u8A2D\u5B9A\u753B\u9762\u304B\u3089 Cookie \u3092\u5165\u529B\u3057\u3066\u304F\u3060\u3055\u3044\u3002", 8e3);
+    } else if (msg.includes("maxFileSizeExceeded")) {
+      new import_obsidian.Notice("\u753B\u50CF\u304C\u5927\u304D\u3059\u304E\u307E\u3059\uFF085MB \u5236\u9650\uFF09\u3002\u753B\u50CF\u3092\u5C0F\u3055\u304F\u3057\u3066\u304F\u3060\u3055\u3044\u3002", 8e3);
     } else {
-      userMessage = `\u30A8\u30E9\u30FC: ${message}`;
+      new import_obsidian.Notice(`\u6295\u7A3F\u5931\u6557: ${msg}`, 8e3);
     }
-    new import_obsidian.Notice(userMessage, 1e4);
   }
 };
