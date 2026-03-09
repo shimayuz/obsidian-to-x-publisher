@@ -739,7 +739,7 @@ export default class XPublisherPlugin extends Plugin {
             }
         });
 
-        this.addRibbonIcon('upload', 'X Article に投稿', async () => {
+        this.addRibbonIcon('send', 'X Article に投稿', async () => {
             const file = this.app.workspace.getActiveFile();
             if (file && file.extension === 'md') {
                 await this.publishCurrentFile(file);

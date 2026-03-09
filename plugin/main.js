@@ -560,7 +560,7 @@ var XPublisherPlugin = class extends import_obsidian.Plugin {
         return false;
       }
     });
-    this.addRibbonIcon("upload", "X Article \u306B\u6295\u7A3F", async () => {
+    this.addRibbonIcon("send", "X Article \u306B\u6295\u7A3F", async () => {
       const file = this.app.workspace.getActiveFile();
       if (file && file.extension === "md") {
         await this.publishCurrentFile(file);
