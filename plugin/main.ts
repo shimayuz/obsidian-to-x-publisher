@@ -1,5 +1,6 @@
 import { App, ButtonComponent, Modal, Notice, Plugin, PluginSettingTab, Setting, TFile, requestUrl } from 'obsidian';
 import * as path from 'path';
+import { applyFrontmatterUpdates } from './frontmatter';
 
 // ========================================
 // Types
@@ -46,52 +47,7 @@ interface SessionStatus {
 
 async function updateFrontmatter(app: App, file: TFile, updates: Record<string, any>): Promise<void> {
     const content = await app.vault.read(file);
-    const frontmatterRegex = /^---\s*\n([\s\S]*?)\n---\s*\n?/;
-    let newContent: string;
-
-    const match = content.match(frontmatterRegex);
-    if (match) {
-        const existingLines = match[1].split('\n');
-        const existingMap = new Map<string, number>();
-        existingLines.forEach((line, idx) => {
-            const keyMatch = line.match(/^(\S+):/);
-            if (keyMatch) existingMap.set(keyMatch[1], idx);
-        });
-
-        const newFrontmatterLines = [...existingLines];
-        for (const [key, value] of Object.entries(updates)) {
-            if (value === null || value === undefined) continue;
-            const formatted = value === ''
-                ? `${key}: ""`
-                : typeof value === 'string' && (value.includes(':') || value.includes('#') || value.includes('"'))
-                    ? `${key}: "${value.replace(/"/g, '\\"')}"`
-                    : `${key}: ${value}`;
-            const existingIdx = existingMap.get(key);
-            if (existingIdx !== undefined) {
-                newFrontmatterLines[existingIdx] = formatted;
-            } else {
-                newFrontmatterLines.push(formatted);
-            }
-        }
-        const newFrontmatter = `---\n${newFrontmatterLines.join('\n')}\n---\n`;
-        newContent = content.replace(frontmatterRegex, newFrontmatter);
-    } else {
-        const newFrontmatterLines: string[] = [];
-        for (const [key, value] of Object.entries(updates)) {
-            if (value !== null && value !== undefined) {
-                if (value === '') {
-                    newFrontmatterLines.push(`${key}: ""`);
-                } else if (typeof value === 'string' && (value.includes(':') || value.includes('#') || value.includes('"'))) {
-                    newFrontmatterLines.push(`${key}: "${value.replace(/"/g, '\\"')}"`);
-                } else {
-                    newFrontmatterLines.push(`${key}: ${value}`);
-                }
-            }
-        }
-        const newFrontmatter = `---\n${newFrontmatterLines.join('\n')}\n---\n\n`;
-        newContent = newFrontmatter + content;
-    }
-
+    const newContent = applyFrontmatterUpdates(content, updates);
     await app.vault.modify(file, newContent);
 }
 

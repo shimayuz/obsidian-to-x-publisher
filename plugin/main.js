@@ -33,15 +33,10 @@ __export(exports, {
 });
 var import_obsidian = __toModule(require("obsidian"));
 var path = __toModule(require("path"));
-var DEFAULT_SETTINGS = {
-  serverUrl: "http://127.0.0.1:3001",
-  openAfterPublish: true,
-  showNotification: true
-};
-async function updateFrontmatter(app, file, updates) {
-  const content = await app.vault.read(file);
+
+// frontmatter.ts
+function applyFrontmatterUpdates(content, updates) {
   const frontmatterRegex = /^---\s*\n([\s\S]*?)\n---\s*\n?/;
-  let newContent;
   const match = content.match(frontmatterRegex);
   if (match) {
     const existingLines = match[1].split("\n");
@@ -51,43 +46,55 @@ async function updateFrontmatter(app, file, updates) {
       if (keyMatch)
         existingMap.set(keyMatch[1], idx);
     });
-    const newFrontmatterLines = [...existingLines];
+    const newFrontmatterLines2 = [...existingLines];
     for (const [key, value] of Object.entries(updates)) {
       if (value === null || value === void 0)
         continue;
-      const formatted = value === "" ? `${key}: ""` : typeof value === "string" && (value.includes(":") || value.includes("#") || value.includes('"')) ? `${key}: "${value.replace(/"/g, '\\"')}"` : `${key}: ${value}`;
+      const formatted = formatFrontmatterLine(key, value);
       const existingIdx = existingMap.get(key);
       if (existingIdx !== void 0) {
-        newFrontmatterLines[existingIdx] = formatted;
+        newFrontmatterLines2[existingIdx] = formatted;
       } else {
-        newFrontmatterLines.push(formatted);
+        newFrontmatterLines2.push(formatted);
       }
     }
-    const newFrontmatter = `---
-${newFrontmatterLines.join("\n")}
+    const newFrontmatter2 = `---
+${newFrontmatterLines2.join("\n")}
 ---
 `;
-    newContent = content.replace(frontmatterRegex, newFrontmatter);
-  } else {
-    const newFrontmatterLines = [];
-    for (const [key, value] of Object.entries(updates)) {
-      if (value !== null && value !== void 0) {
-        if (value === "") {
-          newFrontmatterLines.push(`${key}: ""`);
-        } else if (typeof value === "string" && (value.includes(":") || value.includes("#") || value.includes('"'))) {
-          newFrontmatterLines.push(`${key}: "${value.replace(/"/g, '\\"')}"`);
-        } else {
-          newFrontmatterLines.push(`${key}: ${value}`);
-        }
-      }
+    return content.replace(frontmatterRegex, () => newFrontmatter2);
+  }
+  const newFrontmatterLines = [];
+  for (const [key, value] of Object.entries(updates)) {
+    if (value !== null && value !== void 0) {
+      newFrontmatterLines.push(formatFrontmatterLine(key, value));
     }
-    const newFrontmatter = `---
+  }
+  const newFrontmatter = `---
 ${newFrontmatterLines.join("\n")}
 ---
 
 `;
-    newContent = newFrontmatter + content;
+  return newFrontmatter + content;
+}
+function formatFrontmatterLine(key, value) {
+  if (value === "")
+    return `${key}: ""`;
+  if (typeof value === "string" && (value.includes(":") || value.includes("#") || value.includes('"'))) {
+    return `${key}: "${value.replace(/"/g, '\\"')}"`;
   }
+  return `${key}: ${value}`;
+}
+
+// main.ts
+var DEFAULT_SETTINGS = {
+  serverUrl: "http://127.0.0.1:3001",
+  openAfterPublish: true,
+  showNotification: true
+};
+async function updateFrontmatter(app, file, updates) {
+  const content = await app.vault.read(file);
+  const newContent = applyFrontmatterUpdates(content, updates);
   await app.vault.modify(file, newContent);
 }
 function getTodayDate() {
