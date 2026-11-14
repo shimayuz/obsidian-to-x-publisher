@@ -30,7 +30,34 @@ dotenv.config({ path: ENV_PATH });
 const { publishToXAPI } = require('./x-api-publisher');
 
 const app = express();
+
+// ========================================
+// Request Origin Guard
+// ========================================
+// このサーバーは Obsidian プラグインだけが使う。ブラウザで開いた Web ページからの
+// リクエスト（クロスサイトの POST、DNS リバインディング）を拒否する。
+const ALLOWED_HOSTS = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`]);
+const ALLOWED_ORIGINS = new Set(['app://obsidian.md']);
+
+function isAllowedRequest(req) {
+    const host = String(req.headers.host || '').toLowerCase();
+    if (!ALLOWED_HOSTS.has(host)) return false;
+    const origin = req.headers.origin;
+    if (origin !== undefined && !ALLOWED_ORIGINS.has(origin)) return false;
+    return true;
+}
+
+app.use((req, res, next) => {
+    if (!isAllowedRequest(req)) {
+        return res.status(403).json({ error: 'forbidden' });
+    }
+    next();
+});
+
 app.use(express.json({ limit: '50mb' }));
+
+// Cookie の値として使える文字だけを受け付ける（改行などで .env に行を足されないようにする）
+const TOKEN_PATTERN = /^[A-Za-z0-9%._~+/=-]{1,1024}$/;
 
 // ブラウザセッションセットアップ状態
 const browserSetup = {
@@ -105,6 +132,10 @@ app.post('/session/cookies', (req, res) => {
 
     if (!authToken) {
         return res.status(400).json({ error: 'authToken は必須です' });
+    }
+    if (typeof authToken !== 'string' || !TOKEN_PATTERN.test(authToken) ||
+        (csrfToken && (typeof csrfToken !== 'string' || !TOKEN_PATTERN.test(csrfToken)))) {
+        return res.status(400).json({ error: 'authToken / csrfToken の形式が正しくありません' });
     }
 
     const expires = Math.floor(Date.now() / 1000) + 365 * 24 * 60 * 60;

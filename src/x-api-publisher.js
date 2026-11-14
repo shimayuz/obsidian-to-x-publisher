@@ -22,7 +22,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const os = require('os');
-const { execSync } = require('child_process');
+const { execFileSync } = require('child_process');
 
 const COOKIES_PATH = path.join(__dirname, '../x-cookies.json');
 
@@ -179,16 +179,18 @@ function compressImageIfNeeded(imagePath) {
     const originalSize = fs.statSync(imagePath).size;
     if (originalSize <= MAX_UPLOAD_BYTES) return { filePath: imagePath, isTemp: false };
 
-    const basename = path.basename(imagePath, path.extname(imagePath));
-    const tmpPath = path.join(os.tmpdir(), `${basename}_xpub_compressed.jpg`);
+    // 一時ファイル名に元のファイル名を使わない（予測できない名前にする）
+    const tmpPath = path.join(os.tmpdir(), `xpub_${crypto.randomBytes(8).toString('hex')}_compressed.jpg`);
 
     console.log(`[API]   ⚠️  ${(originalSize / 1024 / 1024).toFixed(1)}MB > 5MB 制限 → sips で圧縮します`);
 
     // 品質を段階的に下げながら 5MB 未満になるまで試す
     for (const quality of [80, 60, 40, 20]) {
         try {
-            execSync(
-                `sips -s format jpeg -s formatOptions ${quality} -Z 2048 "${imagePath}" --out "${tmpPath}"`,
+            // シェルを通さず引数の配列で渡す（ファイル名がコマンドとして解釈されない）
+            execFileSync(
+                'sips',
+                ['-s', 'format', 'jpeg', '-s', 'formatOptions', String(quality), '-Z', '2048', imagePath, '--out', tmpPath],
                 { stdio: 'ignore' }
             );
             const compressedSize = fs.statSync(tmpPath).size;
@@ -579,6 +581,11 @@ async function publishToXAPI({ title, markdown, images = [] }) {
     for (const img of images) {
         if (!img.absolutePath || !fs.existsSync(img.absolutePath)) {
             console.warn(`[API Publisher] ⚠️  画像ファイル不在: ${img.fileName}`);
+            continue;
+        }
+        // 対応している画像形式だけをアップロードする（画像以外のファイルは送らない）
+        if (!MIME_MAP[path.extname(img.absolutePath).toLowerCase()]) {
+            console.warn(`[API Publisher] ⚠️  画像ではないためスキップ: ${img.fileName}`);
             continue;
         }
         try {
